@@ -1,6 +1,7 @@
 # Autonomous Maize Rover: Mission Manager & Cloud IoT Ecosystem
 
 [![GitHub](https://img.shields.io/badge/GitHub-Repository-blue.svg)](https://github.com/Elikplim-N/rover-mission-manager)
+[![Vercel Deployment](https://img.shields.io/badge/Vercel-Live_App-black?logo=vercel)](https://rover-mission-manager.vercel.app)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18.6-blue)](https://www.postgresql.org/)
 [![Arduino](https://img.shields.io/badge/Arduino-Uno_R4_WiFi-teal)](https://store.arduino.cc/products/uno-r4-wifi)
 [![React](https://img.shields.io/badge/React-19-cyan)](https://react.dev/)
