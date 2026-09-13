@@ -19,8 +19,12 @@ export function getDokployConfig(): DokployConfig {
       // fallback
     }
   }
+  const defaultUrl = typeof window !== 'undefined' && window.location.hostname !== 'localhost'
+    ? window.location.origin
+    : 'http://localhost:3001';
+
   return {
-    serverUrl: 'http://localhost:3001',
+    serverUrl: defaultUrl,
     autoSync: false,
     apiKey: '',
     directRoverIp: ''
