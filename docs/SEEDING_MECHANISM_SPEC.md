@@ -9,7 +9,7 @@
 
 ## 1. Engineering 3D CAD Visualization
 
-![Rotary Drum Seeding Mechanism](/home/elikplim/.gemini/antigravity-cli/brain/a22af529-05f1-4f93-92e1-200ca937201b/rover_rotary_seeder_1789343650993.jpg)
+![Modular Seeder Pod](/home/elikplim/.gemini/antigravity-cli/brain/a22af529-05f1-4f93-92e1-200ca937201b/modular_seeder_pod_1789344766456.jpg)
 
 ---
 
@@ -134,3 +134,23 @@ void actuateSeedDrop() {
 | **7** | Chassis Mounting Bolts | M4 × 16 mm Stainless Steel Hex Socket Screws + Lock Nuts | 4 |
 | **8** | Housing Assembly Fasteners | M3 × 12 mm Button Head Screws + Brass Heat-Set Inserts | 4 |
 | **9** | Furrow Drop Tube | Ø20 mm Polycarbonate / Clear Acrylic Tube (beveled tip) | 1 |
+
+---
+
+## 8. Downloadable 3D-Printable STL Models
+
+All 3 components are 100% Watertight (Manifold) and ready to slice:
+
+1. 🏛️ **[Modular Chassis Base with MG996R Motor Mount (`modular_seeder_chassis_base.stl`)](https://github.com/Elikplim-N/rover-mission-manager/blob/main/models/stl/modular_seeder_chassis_base.stl)**:
+   - Dedicated 4-bolt MG996R motor mount ($49.5\text{ mm} \times 10.0\text{ mm}$ ear screw holes).
+   - Heavy-duty chassis mounting flange with 4x M4 slotted holes ($64\text{ mm} \times 36\text{ mm}$ pattern).
+   - Integrated lower drop chute nozzle & wire strain relief conduit.
+2. 🔄 **[Modular Rotor Drum (`modular_seeder_rotor.stl`)](https://github.com/Elikplim-N/rover-mission-manager/blob/main/models/stl/modular_seeder_rotor.stl)**:
+   - Precision maize seed pocket with 35° forward relief ramp.
+   - Dual perimeter agitator ridges preventing hopper bridging.
+   - 8mm front axle stub + rear 25T metal servo horn recess.
+3. 🛡️ **[Modular Front Cover (`modular_seeder_front_cover.stl`)](https://github.com/Elikplim-N/rover-mission-manager/blob/main/models/stl/modular_seeder_front_cover.stl)**:
+   - 608ZZ ball bearing seat ($22.1\text{ mm} \times 7.2\text{ mm}$).
+   - Top circular hopper mounting collar (Ø38mm OD, Ø24mm throat).
+   - Flexible silicone wiper blade retention slot.
+4. 📦 **[Full Reference Assembly (`modular_seeder_full_assembly.stl`)](https://github.com/Elikplim-N/rover-mission-manager/blob/main/models/stl/modular_seeder_full_assembly.stl)**.
