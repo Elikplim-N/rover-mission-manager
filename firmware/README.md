@@ -1,8 +1,10 @@
 # Maize Rover: Phase 2 Master Firmware (Arduino Uno R4 WiFi)
 
-## Architectural Model: Pure IoT Cloud-First (No SD Card)
+## Architectural Model: Local-First, No Internet Required in the Field
 
-This firmware implements a **Pure Cloud-First IoT Architecture**. Rather than relying on fragile physical MicroSD cards and SPI bus wiring, the rover leverages the **Arduino Uno R4 WiFi's onboard ESP32-S3 coprocessor** to stream live telemetry straight to your remote PostgreSQL server via Dokploy.
+This firmware hosts its own WiFi network (Access Point mode) instead of joining a farm router or phone hotspot. A phone or laptop connects directly to the rover's network and controls it over the local subnet — mission configuration, start/pause/resume, manual teleop, and telemetry are all served from the rover itself at a fixed address, with no dependency on mobile data or an internet connection reaching the field. A completed mission is logged on the connecting device and can be pushed to the cloud afterward, from the app, purely for later analysis.
+
+There is also no SD card. Rather than relying on fragile physical MicroSD cards and SPI bus wiring, the Arduino Uno R4 WiFi's pins that would otherwise be reserved for an SD breakout are freed up for actuators and status indicators.
 
 ---
 
@@ -19,17 +21,17 @@ This firmware implements a **Pure Cloud-First IoT Architecture**. Rather than re
 2. **Reduced Mechanical & Electrical Failure Points**:
    - SD card sockets frequently disconnect or corrupt files under high rover vibration over rough furrow soil.
    - Saves ~80mA current spikes from the 5V regulator.
-3. **Live Remote Ingestion**:
-   - Telemetry points land in PostgreSQL on `178.105.184.157:6000/rover-hub` instantaneously at every drop.
-   - The web app dashboard visualizes real-time furrow progress and sensor telemetry without waiting for the mission to finish or manually transferring cards.
+3. **Local-First Mission Data**:
+   - Every drop's telemetry is held on the rover in a live snapshot (`/cmd?action=status`) and logged by the connecting app straight to that device's own storage, with no server or connection required for the mission to run or be recorded.
+   - A mission can be pushed to the cloud afterward, from the app, whenever it happens to have an internet connection — this is for later analysis only and is never on the rover's critical path.
 
 ---
 
-## Dual Telemetry Pipelines
+## Telemetry Pipelines
 
-1. **Pipeline 1 (Cloud Wi-Fi)**:
-   - For every seed drop, constructs a JSON payload.
-   - Dispatches an HTTP `POST /api/telemetry` over Wi-Fi / 4G Mobile Hotspot directly to your Dokploy server.
+1. **Pipeline 1 (Local Command/Status Server, Port 8080)**:
+   - Serves mission lifecycle commands (`config`, `start_mission`, `pause_mission`, `resume_mission`, `status`) and manual teleop/E-Stop over the rover's own WiFi network.
+   - `status` returns the latest telemetry snapshot and mission progress; a companion app polls this to log each drop on-device.
 2. **Pipeline 2 (Local USB / Telemetry Radio)**:
    - Prints the standard 19-column CSV row at 115200 baud on USB Serial for local laptop debugging and radio receivers.
 
@@ -56,13 +58,12 @@ This firmware implements a **Pure Cloud-First IoT Architecture**. Rather than re
 
 ---
 
-## Cloud Telemetry Ingestion Configuration
+## Access Point Configuration
 
 In `MaizeRover_Phase2_Master.ino`:
 ```cpp
-const char* WIFI_SSID     = "Your_Farm_WiFi_or_Hotspot";
-const char* WIFI_PASS     = "Your_WiFi_Password";
-const char* CLOUD_HOST    = "rover-mission-manager-iota.vercel.app"; // Cloud API host
-const int   CLOUD_PORT    = 443;                                     // Port 443 (HTTPS) or 80 (HTTP)
-const bool  USE_HTTPS     = true;                                    // WiFiSSLClient enabled for Vercel
+const char* AP_SSID       = "MaizeRover-Field01";
+const char* AP_PASSWORD   = "PlantMaize1";
 ```
+
+Change the password before field deployment (WPA2 requires 8-63 characters). The rover always comes up at the same address, `192.168.4.1` — the WiFiS3 library's default for Access Point mode — so a phone or laptop just needs to join the `AP_SSID` network and open the app; there is no IP to look up.
