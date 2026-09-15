@@ -38,19 +38,21 @@ enum RoverMode {
 RoverMode currentMode = MODE_AUTO;
 
 // =========================================================================
-// NETWORK & DOKPLOY SERVER CONFIGURATION
+// NETWORK & CLOUD INGESTION CONFIGURATION
 // =========================================================================
 const char* WIFI_SSID     = "Your_Farm_WiFi_or_Hotspot";
 const char* WIFI_PASS     = "Your_WiFi_Password";
 
-// Dokploy Cloud API Host (PostgreSQL 18.6 backend)
-const char* DOKPLOY_HOST  = "178.105.184.157";
-const int   DOKPLOY_PORT  = 3001;
+// Cloud Ingestion Target (Vercel Serverless connected to PostgreSQL)
+const char* CLOUD_HOST    = "rover-mission-manager-iota.vercel.app";
+const int   CLOUD_PORT    = 443;
+const bool  USE_HTTPS     = true; // True for Vercel HTTPS (Port 443), False for plain HTTP (Port 80/custom)
 const char* MISSION_ID    = "active-field-run";
 
 // Embedded Command Server for Local Subnet Teleop & E-Stop
 WiFiServer cmdServer(8080);
 WiFiClient wifiClient;
+WiFiSSLClient sslClient;
 
 // =========================================================================
 // I2C ADDRESSES
@@ -463,7 +465,9 @@ void executePlantingDrop() {
 void streamToDokployCloud(int row, int drop, float synX, float synY, float volt, float tempC, float hum, float press, float elev, int moist, bool watered, float absHead, float err, float pitch, float roll, float lat, float lng, int sats, float obsDist) {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  if (wifiClient.connect(DOKPLOY_HOST, DOKPLOY_PORT)) {
+  Client* clientPtr = USE_HTTPS ? (Client*)&sslClient : (Client*)&wifiClient;
+
+  if (clientPtr->connect(CLOUD_HOST, CLOUD_PORT)) {
     String jsonPayload = "{\"missionId\":\"" + String(MISSION_ID) + "\"" +
                          ",\"row\":" + String(row) +
                          ",\"drop\":" + String(drop) +
@@ -485,15 +489,30 @@ void streamToDokployCloud(int row, int drop, float synX, float synY, float volt,
                          ",\"sats\":" + String(sats) +
                          ",\"obsDist\":" + String(obsDist, 1) + "}";
 
-    wifiClient.println("POST /api/telemetry HTTP/1.1");
-    wifiClient.println("Host: " + String(DOKPLOY_HOST) + ":" + String(DOKPLOY_PORT));
-    wifiClient.println("Content-Type: application/json");
-    wifiClient.println("Content-Length: " + String(jsonPayload.length()));
-    wifiClient.println("Connection: close");
-    wifiClient.println();
-    wifiClient.println(jsonPayload);
+    clientPtr->println("POST /api/telemetry HTTP/1.1");
+    clientPtr->println("Host: " + String(CLOUD_HOST));
+    clientPtr->println("Content-Type: application/json");
+    clientPtr->println("Content-Length: " + String(jsonPayload.length()));
+    clientPtr->println("Connection: close");
+    clientPtr->println();
+    clientPtr->println(jsonPayload);
+
+    // Read piggybacked command from cloud response (e.g. Remote E-Stop)
+    unsigned long timeout = millis() + 600;
+    while (clientPtr->connected() && millis() < timeout) {
+      if (clientPtr->available()) {
+        String line = clientPtr->readStringUntil('\n');
+        if (line.indexOf("\"estop\"") != -1 && currentMode != MODE_ESTOP) {
+          currentMode = MODE_ESTOP;
+          stopMotors();
+          digitalWrite(PUMP_RELAY_PIN, HIGH);
+          tone(BUZZER_PIN, 1200, 500);
+          Serial.println(F("[CLOUD ESTOP] Preemptive E-Stop received from cloud telemetry!"));
+        }
+      }
+    }
     
-    wifiClient.stop();
+    clientPtr->stop();
   }
 }
 
