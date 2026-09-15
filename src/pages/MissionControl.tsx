@@ -12,7 +12,9 @@ import {
   Thermometer,
   Satellite,
   Gauge,
-  FolderOpen
+  FolderOpen,
+  Timer,
+  X
 } from 'lucide-react';
 import {
   sendRoverCommand,
@@ -58,12 +60,15 @@ export default function MissionControl() {
   const [savedRunId, setSavedRunId] = useState<string | null>(null);
   const [loggedPoints, setLoggedPoints] = useState(0);
   const [hasRun, setHasRun] = useState(false);
+  const [countdown, setCountdown] = useState<number | null>(null);
 
   // Refs so the polling closure always sees the latest in-progress run
   // without re-registering the interval on every telemetry point.
   const runRef = useRef<MissionRun | null>(null);
   const lastSeqRef = useRef<number>(-1);
   const missionActiveRef = useRef(false);
+  const statusRef = useRef<RoverStatus | null>(null);
+  const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const poll = useCallback(async () => {
     const res = await fetchRoverStatus();
@@ -75,6 +80,7 @@ export default function MissionControl() {
     setConnState('connected');
     setError(null);
     setStatus(res.status);
+    statusRef.current = res.status;
 
     const s = res.status;
 
@@ -136,6 +142,14 @@ export default function MissionControl() {
     return () => clearInterval(interval);
   }, [connState, poll]);
 
+  // Cancel any pending auto-start countdown on unmount, so it never fires
+  // a start_mission command after the operator has navigated away.
+  useEffect(() => {
+    return () => {
+      if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+    };
+  }, []);
+
   function handleConnect() {
     if (!directIp.trim()) {
       setError("Enter the rover's LAN IP address first.");
@@ -148,12 +162,46 @@ export default function MissionControl() {
   }
 
   function handleDisconnect() {
+    cancelAutoStart();
     setConnState('disconnected');
     setStatus(null);
+    statusRef.current = null;
     runRef.current = null;
     lastSeqRef.current = -1;
     missionActiveRef.current = false;
     setHasRun(false);
+  }
+
+  function cancelAutoStart() {
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+    setCountdown(null);
+  }
+
+  function beginAutoStartCountdown() {
+    // Tracks the count in a plain variable rather than a setState updater
+    // function: React (in StrictMode) double-invokes updater functions to
+    // catch impurity, which would fire the side-effecting startMission()
+    // call below twice.
+    let remaining = 3;
+    setCountdown(remaining);
+    countdownTimerRef.current = setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        clearInterval(countdownTimerRef.current!);
+        countdownTimerRef.current = null;
+        setCountdown(null);
+        // Re-check the freshest known state before actually starting, in
+        // case something changed during the 3s window (e.g. an E-Stop).
+        if (statusRef.current?.mode === 'IDLE') {
+          startMission();
+        }
+      } else {
+        setCountdown(remaining);
+      }
+    }, 1000);
   }
 
   async function applyConfig() {
@@ -171,12 +219,16 @@ export default function MissionControl() {
     if (res.ok) {
       setConfigApplied(true);
       setTimeout(() => setConfigApplied(false), 2500);
+      if (statusRef.current?.mode === 'IDLE') {
+        beginAutoStartCountdown();
+      }
     } else {
       setError(res.error || 'Failed to apply configuration.');
     }
   }
 
   async function startMission() {
+    cancelAutoStart();
     setDispatching(true);
     const res = await sendRoverCommand('start_mission');
     setDispatching(false);
@@ -184,6 +236,7 @@ export default function MissionControl() {
   }
 
   async function pauseMission() {
+    cancelAutoStart();
     setDispatching(true);
     const res = await sendRoverCommand('pause_mission');
     setDispatching(false);
@@ -294,7 +347,7 @@ export default function MissionControl() {
 
             <button
               onClick={applyConfig}
-              disabled={dispatching || status.missionActive}
+              disabled={dispatching || status.missionActive || countdown !== null}
               className="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium px-4 py-2 rounded-md"
             >
               {configApplied ? 'Configuration Applied' : 'Apply Configuration'}
@@ -304,7 +357,30 @@ export default function MissionControl() {
                 Pause or wait for mission completion to change configuration.
               </p>
             )}
+            {mode === 'IDLE' && (
+              <p className="text-[11px] text-gray-400">
+                Applying configuration while idle starts the mission automatically after a 3 second countdown.
+              </p>
+            )}
           </div>
+
+          {countdown !== null && (
+            <div className="bg-amber-500 text-white rounded-2xl p-5 shadow-lg flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <Timer className="w-6 h-6 animate-pulse" />
+                <div>
+                  <p className="text-sm font-bold">Starting mission in {countdown}&hellip;</p>
+                  <p className="text-xs text-amber-50">Make sure the rover's path is clear.</p>
+                </div>
+              </div>
+              <button
+                onClick={cancelAutoStart}
+                className="flex items-center gap-1.5 bg-white text-amber-700 text-xs font-semibold px-3 py-2 rounded-lg hover:bg-amber-50"
+              >
+                <X className="w-3.5 h-3.5" /> Cancel
+              </button>
+            </div>
+          )}
 
           {/* Step 3: Run */}
           <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl p-6 shadow-xs space-y-4">
@@ -328,7 +404,7 @@ export default function MissionControl() {
             <div className="flex flex-wrap gap-3">
               <button
                 onClick={startMission}
-                disabled={dispatching || mode !== 'IDLE'}
+                disabled={dispatching || mode !== 'IDLE' || countdown !== null}
                 className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-sm font-medium px-4 py-2 rounded-md"
               >
                 <Play className="w-4 h-4 fill-white" /> Start Mission
