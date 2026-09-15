@@ -12,6 +12,10 @@ export const pool = new Pool({
 let isPostgresAvailable = false;
 const inMemoryMissions = new Map();
 
+export function getPostgresStatus() {
+  return isPostgresAvailable;
+}
+
 export async function initDB() {
   try {
     const client = await pool.connect();

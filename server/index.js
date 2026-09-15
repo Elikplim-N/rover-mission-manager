@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { initDB, saveMission, appendTelemetryPoint, getAllMissions, getMissionById } from './db.js';
+import { initDB, saveMission, appendTelemetryPoint, getAllMissions, getMissionById, getPostgresStatus } from './db.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -32,7 +32,7 @@ app.get('/api/health', (req, res) => {
     status: 'ok',
     service: 'rover-mission-dokploy-server',
     version: '1.1.0',
-    database: 'connected',
+    database: getPostgresStatus() ? 'connected' : 'unavailable (in-memory fallback)',
     timestamp: new Date().toISOString()
   });
 });
