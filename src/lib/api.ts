@@ -181,56 +181,35 @@ export interface CommandResponse {
 export async function sendRoverCommand(action: RoverAction, params: Record<string, unknown> = {}): Promise<CommandResponse> {
   const config = getDokployConfig();
 
-  // 1. Try Direct Rover LAN IP if configured for instant <20ms latency
-  if (config.directRoverIp) {
-    try {
-      const cleanIp = config.directRoverIp.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-      const query = new URLSearchParams({ action, ...Object.fromEntries(
-        Object.entries(params).map(([k, v]) => [k, String(v)])
-      ) }).toString();
-      const directUrl = `http://${cleanIp}:8080/cmd?${query}`;
-      const res = await fetch(directUrl, {
-        method: 'GET',
-        signal: AbortSignal.timeout(1200)
-      });
-      if (res.ok) {
-        const data = await res.json();
-        return { ok: true, mode: data.mode, source: 'direct' };
-      }
-    } catch {
-      // Fallback to Dokploy cloud relay
-    }
+  // The rover only ever receives commands over its own local Access Point.
+  // There used to be a cloud-relay fallback here, but it relied on the rover
+  // polling the cloud API for queued commands, and that polling was removed
+  // when the firmware switched to Access Point mode (it has no internet path
+  // at all now). Falling back to the cloud here would either fail confusingly
+  // or, worse, report a false "success" that never reaches the physical
+  // rover, so this only ever talks to the rover directly.
+  if (!config.directRoverIp) {
+    return { ok: false, error: "No rover IP configured. Connect this device to the rover's own WiFi network first." };
   }
 
-  // 2. Dispatch via Dokploy Cloud Relay API
-  if (!config.serverUrl) {
-    return { ok: false, error: 'Dokploy Server URL not configured.' };
-  }
-
-  const url = config.serverUrl.replace(/\/+$/, '');
   try {
-    const res = await fetch(`${url}/api/command`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json'
-      },
-      body: JSON.stringify({ action, params }),
-      signal: AbortSignal.timeout(3000)
+    const cleanIp = config.directRoverIp.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    const query = new URLSearchParams({ action, ...Object.fromEntries(
+      Object.entries(params).map(([k, v]) => [k, String(v)])
+    ) }).toString();
+    const directUrl = `http://${cleanIp}:8080/cmd?${query}`;
+    const res = await fetch(directUrl, {
+      method: 'GET',
+      signal: AbortSignal.timeout(1200)
     });
-
     if (!res.ok) {
-      return { ok: false, error: `HTTP ${res.status}: ${res.statusText}` };
+      return { ok: false, error: `Rover returned HTTP ${res.status}` };
     }
-
     const data = await res.json();
-    if (data.offline || data.ok === false) {
-      return { ok: false, error: data.error || data.message || 'Cloud relay is offline.' };
-    }
-    return { ok: true, mode: data.mode, source: 'cloud' };
+    return { ok: true, mode: data.mode, source: 'direct' };
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: errorMsg };
+    return { ok: false, error: `Could not reach the rover at ${config.directRoverIp}: ${errorMsg}` };
   }
 }
 
