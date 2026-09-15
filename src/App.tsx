@@ -7,6 +7,7 @@ import MissionView from './pages/MissionView';
 import Fields from './pages/Fields';
 import Analytics from './pages/Analytics';
 import Teleop from './pages/Teleop';
+import MissionControl from './pages/MissionControl';
 
 function App() {
   return (
@@ -14,6 +15,7 @@ function App() {
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
+          <Route path="mission-control" element={<MissionControl />} />
           <Route path="planner" element={<Planner />} />
           <Route path="library" element={<Library />} />
           <Route path="mission/:id" element={<MissionView />} />

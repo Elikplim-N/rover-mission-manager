@@ -81,7 +81,7 @@ Arduino Uno R4 Pinout
 │   └── HMC5883L / QMC5883L (0x1E / 0x0D): Absolute compass heading
 ├── Analog Inputs
 │   ├── A0: Soil Moisture Probe (0 - 1023 ADC raw resistance/capacitance)
-│   ├── A1: Battery Voltage Divider (10k/10k divider network, 2x multiplier)
+│   ├── A1: Battery Voltage Divider (B25 module, 5:1 divider, 0-25V range)
 │   ├── A2: Ultrasonic Trigger (HC-SR04 pulse initiation)
 │   └── A3: Ultrasonic Echo (HC-SR04 return pulse duration)
 ├── Actuators & Motor Control

@@ -142,7 +142,32 @@ export type RoverAction =
   | 'stop'
   | 'test_seed'
   | 'test_water'
-  | 'test_arm';
+  | 'test_arm'
+  | 'config'
+  | 'start_mission'
+  | 'pause_mission'
+  | 'resume_mission'
+  | 'status';
+
+// Response shape for the 'status' action: the rover's latest telemetry
+// snapshot and mission progress, for local (offline) logging on the device
+// running the app rather than a cloud database.
+export interface RoverStatus {
+  ok: boolean;
+  mode: 'IDLE' | 'AUTO' | 'PAUSED' | 'MANUAL' | 'ESTOP';
+  missionActive: boolean;
+  missionComplete: boolean;
+  row: number;
+  drop: number;
+  totalRows: number;
+  dropsPerRow: number;
+  seq: number;
+  synX: number; synY: number;
+  volt: number; tempC: number; hum: number; press: number; elev: number;
+  moist: number; watered: boolean;
+  absHead: number; err: number; pitch: number; roll: number;
+  lat: number; lng: number; sats: number; obsDist: number;
+}
 
 export interface CommandResponse {
   ok: boolean;
@@ -158,7 +183,10 @@ export async function sendRoverCommand(action: RoverAction, params: Record<strin
   if (config.directRoverIp) {
     try {
       const cleanIp = config.directRoverIp.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-      const directUrl = `http://${cleanIp}:8080/cmd?action=${action}`;
+      const query = new URLSearchParams({ action, ...Object.fromEntries(
+        Object.entries(params).map(([k, v]) => [k, String(v)])
+      ) }).toString();
+      const directUrl = `http://${cleanIp}:8080/cmd?${query}`;
       const res = await fetch(directUrl, {
         method: 'GET',
         signal: AbortSignal.timeout(1200)
@@ -198,6 +226,32 @@ export async function sendRoverCommand(action: RoverAction, params: Record<strin
       return { ok: false, error: data.error || data.message || 'Cloud relay is offline.' };
     }
     return { ok: true, mode: data.mode, source: 'cloud' };
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: errorMsg };
+  }
+}
+
+// Polls the rover directly over the LAN for its full mission/telemetry
+// snapshot. Local-first: requires directRoverIp, since mission control and
+// on-device logging must keep working with no internet connection at all.
+export async function fetchRoverStatus(): Promise<{ ok: boolean; status?: RoverStatus; error?: string }> {
+  const config = getDokployConfig();
+  if (!config.directRoverIp) {
+    return { ok: false, error: 'No direct rover IP configured.' };
+  }
+
+  try {
+    const cleanIp = config.directRoverIp.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    const res = await fetch(`http://${cleanIp}:8080/cmd?action=status`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(1500)
+    });
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}: ${res.statusText}` };
+    }
+    const data: RoverStatus = await res.json();
+    return { ok: true, status: data };
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     return { ok: false, error: errorMsg };
