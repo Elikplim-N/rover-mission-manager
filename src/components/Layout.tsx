@@ -3,6 +3,7 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Bot,
   LayoutDashboard,
+  PlayCircle,
   Compass,
   FolderOpen,
   MapPin,
@@ -28,6 +29,7 @@ export default function Layout() {
 
   const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard },
+    { path: '/mission-control', label: 'Mission Control', icon: PlayCircle },
     { path: '/planner', label: 'Mission Planner', icon: Compass },
     { path: '/library', label: 'Mission Hub', icon: FolderOpen },
     { path: '/teleop', label: 'Manual & E-Stop', icon: ShieldAlert },
