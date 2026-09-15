@@ -1,18 +1,26 @@
 /*
   Maize Rover: Phase 2 Master Firmware (Arduino Uno R4 WiFi)
-  Pure Cloud-First IoT Architecture with Remote E-Stop & Teleoperation
-  
+  Local-First Mission Control with Optional Cloud Sync for Analysis
+
   Operational State Machine:
-  [BOOT] -> [AUTO_MISSION] <---> [MANUAL_OVERRIDE]
-                 |                       |
-                 +-------> [ESTOP] <-----+
-  
+  [BOOT] -> [IDLE: awaiting config/start] -> [AUTO: mission running] <---> [PAUSED]
+                                                     |         |
+                                                [MANUAL] <-----+
+                                                     |
+                                                  [ESTOP] (reachable from any state)
+
   Features:
+  - Local mission configuration and lifecycle control over the port-8080 command
+    server: config, start_mission, pause_mission, resume_mission, status
+  - Status endpoint returns the latest telemetry snapshot and mission progress so a
+    companion app on the same local network can poll and log data on-device, with
+    no internet connection required
+  - Cloud telemetry push to the Dokploy Ingestion API is optional (off by default)
+    and only used for later analysis when a connection happens to be available
   - Immediate Remote E-Stop override (Zero PWM, pump kill, acoustic alarm)
   - Manual Directional Nudge (Forward, Reverse, Left, Right, Stop) with 600ms deadman timeout
   - Actuator Diagnostic Test Bench (Single Seed Pulse, Water Dose 400ms, Arm Toggle)
   - Embedded WiFiServer on Port 8080 for low-latency (<20ms) direct commands
-  - Real-time HTTP POST telemetry stream to Dokploy Ingestion API (PostgreSQL rover-hub)
   - Bosch BME280 Tare Baseline Calibration for Relative Terrain Elevation (Elev)
   - Ultrasonic Obstacle Collision Avoidance & MPU-6050 Pitch/Roll
 */
@@ -30,12 +38,14 @@
 // OPERATIONAL STATE MACHINE DEFINITIONS
 // =========================================================================
 enum RoverMode {
-  MODE_AUTO,      // Autonomous furrow traversal & planting
+  MODE_IDLE,      // Awaiting mission configuration and start command from the app
+  MODE_AUTO,      // Mission running: autonomous furrow traversal & planting
+  MODE_PAUSED,    // Mission interrupted mid-run; holds position, resumable
   MODE_MANUAL,    // Operator teleop & actuator diagnostics
   MODE_ESTOP      // Emergency stop: all power cut, pump off, alarm
 };
 
-RoverMode currentMode = MODE_AUTO;
+RoverMode currentMode = MODE_IDLE;
 
 // =========================================================================
 // NETWORK & DOKPLOY SERVER CONFIGURATION
@@ -79,16 +89,22 @@ WiFiClient wifiClient;
 #define RGB_PIN           13  // WS2812B Status Indicator
 
 // =========================================================================
-// FIELD GEOMETRY & TUNING
+// FIELD GEOMETRY & TUNING (runtime-configurable via /cmd?action=config...)
 // =========================================================================
 #define NUM_LEDS           8
-const int   BASE_SPEED     = 190; 
-const int   TURN_SPEED     = 150; 
-const float DROP_SPACING_M = 0.25;
-const float ROW_SPACING_M  = 0.75;
-const int   DROPS_PER_ROW  = 20;
-const int   MOIST_THRESHOLD= 450;
+int   BASE_SPEED      = 190;
+int   TURN_SPEED      = 150;
+float DROP_SPACING_M  = 0.25;
+float ROW_SPACING_M   = 0.75;
+int   DROPS_PER_ROW   = 20;
+int   TOTAL_ROWS      = 10;
+int   MOIST_THRESHOLD = 450;
 const unsigned long DRIVE_DEADMAN_TIMEOUT = 600; // Auto-stop motors after 600ms of silence
+
+// Mission lifecycle state
+bool missionActive     = false; // true once start_mission has been called
+bool missionComplete   = false; // true once TOTAL_ROWS has been fully covered
+bool cloudSyncEnabled  = false; // Off by default: local-first, cloud push is optional
 
 // Objects
 TinyGPSPlus gps;
@@ -105,6 +121,17 @@ unsigned long lastDropTime = 0;
 unsigned long lastWiFiRetry = 0;
 unsigned long lastDriveCommandTime = 0;
 bool isArmDeployed = false;
+
+// Latest telemetry snapshot, exposed via /cmd?action=status so a companion app on
+// the local network can poll it and log each drop on-device without any cloud
+// connection. telemetrySeq increments once per drop so the app can tell whether a
+// poll returned a new reading or the same one as last time.
+unsigned long telemetrySeq = 0;
+float lastSynX = 0, lastSynY = 0, lastVolt = 0, lastTempC = 0, lastHum = 0, lastPress = 0, lastElev = 0;
+int   lastMoist = 0;
+bool  lastWatered = false;
+float lastAbsHead = 0, lastErr = 0, lastPitch = 0, lastRoll = 0, lastLat = 0, lastLng = 0, lastObsDist = 0;
+int   lastSats = 0;
 
 // =========================================================================
 // SETUP
@@ -171,7 +198,7 @@ void setup() {
   tone(BUZZER_PIN, 1200, 120);
   delay(140);
   tone(BUZZER_PIN, 1800, 180);
-  setRGBColor(strip.Color(0, 255, 0)); // Green: Auto Ready
+  setRGBColor(strip.Color(0, 120, 255)); // Blue: idle, awaiting mission config/start from the app
   strip.show();
 
   Serial.println("Row,Drop,SynX,SynY,Volt,TempC,Hum,Press,Elev,Moist,Watered,AbsHead,Err,Pitch,Roll,Lat,Lng,Sats,ObsDist");
@@ -218,10 +245,23 @@ void loop() {
       setRGBColor(strip.Color(255, 140, 0)); // Solid Amber
       break;
 
+    case MODE_IDLE:
+      // Awaiting a config + start_mission command from the app. Motors stay off.
+      stopMotors();
+      setRGBColor(strip.Color(0, 120, 255)); // Blue: idle
+      break;
+
+    case MODE_PAUSED:
+      // Mission interrupted mid-run. Position (currentRow/currentDrop) is held
+      // so resume_mission can continue from exactly where it left off.
+      stopMotors();
+      setRGBColor(strip.Color(255, 200, 0)); // Amber-yellow: paused
+      break;
+
     case MODE_AUTO:
-    default:
+    default: {
       setRGBColor(strip.Color(0, 255, 0)); // Solid Green
-      
+
       // Collision avoidance
       float obsDist = readUltrasonicCM();
       if (obsDist > 0 && obsDist < 20.0) {
@@ -232,18 +272,46 @@ void loop() {
         return;
       }
 
+      // Mission-complete check: currentRow only advances past TOTAL_ROWS once
+      // the last row's final drop has been executed.
+      if (currentRow > TOTAL_ROWS) {
+        stopMotors();
+        missionActive = false;
+        missionComplete = true;
+        currentMode = MODE_IDLE;
+        tone(BUZZER_PIN, 1500, 150);
+        delay(160);
+        tone(BUZZER_PIN, 2000, 200);
+        Serial.println("[MISSION] Complete.");
+        return;
+      }
+
       // Autonomous Furrow Cycle (every 2.5s)
       if (millis() - lastDropTime >= 2500) {
         lastDropTime = millis();
         executePlantingDrop();
       }
       break;
+    }
   }
 }
 
 // =========================================================================
 // COMMAND SERVER & TELEOP HANDLER (PORT 8080)
 // =========================================================================
+
+// Extracts the value of a query-string key (e.g. "rows" from "...&rows=10&...").
+// Returns "" if the key isn't present in the request.
+String getParam(String req, String key) {
+  String pattern = key + "=";
+  int idx = req.indexOf(pattern);
+  if (idx == -1) return "";
+  idx += pattern.length();
+  int end = idx;
+  while (end < (int)req.length() && req[end] != '&' && req[end] != ' ') end++;
+  return req.substring(idx, end);
+}
+
 void handleIncomingCommands() {
   WiFiClient client = cmdServer.available();
   if (!client) return;
@@ -323,10 +391,85 @@ void handleIncomingCommands() {
     isArmDeployed = !isArmDeployed;
     armServo.write(isArmDeployed ? 0 : 90);
   }
+  else if (action == "config") {
+    // All parameters optional; only the ones present in the request are updated.
+    String v;
+    v = getParam(req, "rows");     if (v.length()) TOTAL_ROWS = v.toInt();
+    v = getParam(req, "drops");    if (v.length()) DROPS_PER_ROW = v.toInt();
+    v = getParam(req, "dropDist"); if (v.length()) DROP_SPACING_M = v.toFloat();
+    v = getParam(req, "rowGap");   if (v.length()) ROW_SPACING_M = v.toFloat();
+    v = getParam(req, "moist");    if (v.length()) MOIST_THRESHOLD = v.toInt();
+    v = getParam(req, "speed");    if (v.length()) BASE_SPEED = v.toInt();
+    v = getParam(req, "turn");     if (v.length()) TURN_SPEED = v.toInt();
+    v = getParam(req, "cloud");    if (v.length()) cloudSyncEnabled = (v == "1");
+    Serial.println("[CONFIG] rows=" + String(TOTAL_ROWS) + " drops=" + String(DROPS_PER_ROW) +
+                    " dropDist=" + String(DROP_SPACING_M) + " rowGap=" + String(ROW_SPACING_M) +
+                    " moist=" + String(MOIST_THRESHOLD) + " speed=" + String(BASE_SPEED) +
+                    " turn=" + String(TURN_SPEED) + " cloud=" + String(cloudSyncEnabled));
+  }
+  else if (action == "start_mission" && currentMode != MODE_ESTOP) {
+    currentRow = 1;
+    currentDrop = 0;
+    missionActive = true;
+    missionComplete = false;
+    lastDropTime = millis();
+    currentMode = MODE_AUTO;
+    Serial.println("[MISSION] Started.");
+  }
+  else if (action == "pause_mission") {
+    if (currentMode == MODE_AUTO) {
+      currentMode = MODE_PAUSED;
+      stopMotors();
+      Serial.println("[MISSION] Paused at row " + String(currentRow) + " drop " + String(currentDrop));
+    }
+  }
+  else if (action == "resume_mission" && currentMode != MODE_ESTOP) {
+    if (missionActive && !missionComplete) {
+      currentMode = MODE_AUTO;
+      lastDropTime = millis();
+      Serial.println("[MISSION] Resumed at row " + String(currentRow) + " drop " + String(currentDrop));
+    }
+  }
+  // "status" needs no handling here: it has no side effects and just falls
+  // through to the status JSON response built below.
 
   // Send JSON HTTP Response
-  String modeStr = (currentMode == MODE_ESTOP) ? "ESTOP" : (currentMode == MODE_MANUAL) ? "MANUAL" : "AUTO";
-  String resp = "{\"ok\":true,\"mode\":\"" + modeStr + "\",\"action\":\"" + action + "\"}";
+  String modeStr = (currentMode == MODE_ESTOP) ? "ESTOP"
+                  : (currentMode == MODE_PAUSED) ? "PAUSED"
+                  : (currentMode == MODE_MANUAL) ? "MANUAL"
+                  : (currentMode == MODE_IDLE) ? "IDLE"
+                  : "AUTO";
+
+  String resp;
+  if (action == "status") {
+    resp = "{\"ok\":true,\"mode\":\"" + modeStr + "\"" +
+           ",\"missionActive\":" + (missionActive ? "true" : "false") +
+           ",\"missionComplete\":" + (missionComplete ? "true" : "false") +
+           ",\"row\":" + String(currentRow) +
+           ",\"drop\":" + String(currentDrop) +
+           ",\"totalRows\":" + String(TOTAL_ROWS) +
+           ",\"dropsPerRow\":" + String(DROPS_PER_ROW) +
+           ",\"seq\":" + String(telemetrySeq) +
+           ",\"synX\":" + String(lastSynX, 2) +
+           ",\"synY\":" + String(lastSynY, 2) +
+           ",\"volt\":" + String(lastVolt, 2) +
+           ",\"tempC\":" + String(lastTempC, 1) +
+           ",\"hum\":" + String(lastHum, 1) +
+           ",\"press\":" + String(lastPress, 1) +
+           ",\"elev\":" + String(lastElev, 2) +
+           ",\"moist\":" + String(lastMoist) +
+           ",\"watered\":" + (lastWatered ? "true" : "false") +
+           ",\"absHead\":" + String(lastAbsHead, 1) +
+           ",\"err\":" + String(lastErr, 1) +
+           ",\"pitch\":" + String(lastPitch, 1) +
+           ",\"roll\":" + String(lastRoll, 1) +
+           ",\"lat\":" + String(lastLat, 6) +
+           ",\"lng\":" + String(lastLng, 6) +
+           ",\"sats\":" + String(lastSats) +
+           ",\"obsDist\":" + String(lastObsDist, 1) + "}";
+  } else {
+    resp = "{\"ok\":true,\"mode\":\"" + modeStr + "\",\"action\":\"" + action + "\"}";
+  }
 
   client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: application/json");
@@ -456,8 +599,21 @@ void executePlantingDrop() {
                      String(obsDist, 1);
   Serial.println(csvRecord);
 
-  // 2. Push to Dokploy Cloud API
-  streamToDokployCloud(currentRow, currentDrop, synX, synY, volt, tempC, hum, press, elev, moist, watered, absHead, err, pitch, roll, lat, lng, sats, obsDist);
+  // 2. Update the latest-telemetry snapshot for the local /cmd?action=status
+  //    endpoint, so a companion app on the same network can poll it and log
+  //    each drop on-device without needing any cloud connection.
+  telemetrySeq++;
+  lastSynX = synX; lastSynY = synY; lastVolt = volt; lastTempC = tempC; lastHum = hum;
+  lastPress = press; lastElev = elev; lastMoist = moist; lastWatered = watered;
+  lastAbsHead = absHead; lastErr = err; lastPitch = pitch; lastRoll = roll;
+  lastLat = lat; lastLng = lng; lastSats = sats; lastObsDist = obsDist;
+
+  // 3. Optionally push to the Dokploy cloud API, only when a connection is
+  //    expected to be available; this is for later analysis and is never
+  //    required for the mission itself to run or be logged locally.
+  if (cloudSyncEnabled) {
+    streamToDokployCloud(currentRow, currentDrop, synX, synY, volt, tempC, hum, press, elev, moist, watered, absHead, err, pitch, roll, lat, lng, sats, obsDist);
+  }
 }
 
 void streamToDokployCloud(int row, int drop, float synX, float synY, float volt, float tempC, float hum, float press, float elev, int moist, bool watered, float absHead, float err, float pitch, float roll, float lat, float lng, int sats, float obsDist) {

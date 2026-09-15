@@ -142,7 +142,32 @@ export type RoverAction =
   | 'stop'
   | 'test_seed'
   | 'test_water'
-  | 'test_arm';
+  | 'test_arm'
+  | 'config'
+  | 'start_mission'
+  | 'pause_mission'
+  | 'resume_mission'
+  | 'status';
+
+// Response shape for the 'status' action: the rover's latest telemetry
+// snapshot and mission progress, for local (offline) logging on the device
+// running the app rather than a cloud database.
+export interface RoverStatus {
+  ok: boolean;
+  mode: 'IDLE' | 'AUTO' | 'PAUSED' | 'MANUAL' | 'ESTOP';
+  missionActive: boolean;
+  missionComplete: boolean;
+  row: number;
+  drop: number;
+  totalRows: number;
+  dropsPerRow: number;
+  seq: number;
+  synX: number; synY: number;
+  volt: number; tempC: number; hum: number; press: number; elev: number;
+  moist: number; watered: boolean;
+  absHead: number; err: number; pitch: number; roll: number;
+  lat: number; lng: number; sats: number; obsDist: number;
+}
 
 export interface CommandResponse {
   ok: boolean;
