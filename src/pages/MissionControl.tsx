@@ -35,7 +35,6 @@ interface MissionParams {
   moist: number;
   speed: number;
   turn: number;
-  cloud: boolean;
 }
 
 const DEFAULT_PARAMS: MissionParams = {
@@ -45,8 +44,7 @@ const DEFAULT_PARAMS: MissionParams = {
   rowGap: 0.75,
   moist: 450,
   speed: 190,
-  turn: 150,
-  cloud: false
+  turn: 150
 };
 
 export default function MissionControl() {
@@ -167,8 +165,7 @@ export default function MissionControl() {
       rowGap: params.rowGap,
       moist: params.moist,
       speed: params.speed,
-      turn: params.turn,
-      cloud: params.cloud ? 1 : 0
+      turn: params.turn
     });
     setDispatching(false);
     if (res.ok) {
@@ -234,7 +231,7 @@ export default function MissionControl() {
             </div>
             <div>
               <h3 className="text-sm font-semibold text-gray-900 dark:text-white">1. Connect to Rover</h3>
-              <p className="text-[11px] text-gray-500 dark:text-gray-400">Same WiFi network as the Arduino Uno R4</p>
+              <p className="text-[11px] text-gray-500 dark:text-gray-400">Join the rover's own WiFi network first, then connect below</p>
             </div>
           </div>
           <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${
@@ -293,17 +290,6 @@ export default function MissionControl() {
               <NumField label="Moisture Threshold" value={params.moist} onChange={(v) => setParams(p => ({ ...p, moist: v }))} />
               <NumField label="Drive Speed" value={params.speed} onChange={(v) => setParams(p => ({ ...p, speed: v }))} />
               <NumField label="Turn Speed" value={params.turn} onChange={(v) => setParams(p => ({ ...p, turn: v }))} />
-              <div className="flex items-end pb-1.5">
-                <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
-                  <input
-                    type="checkbox"
-                    checked={params.cloud}
-                    onChange={(e) => setParams(p => ({ ...p, cloud: e.target.checked }))}
-                    className="rounded"
-                  />
-                  Sync to cloud too
-                </label>
-              </div>
             </div>
 
             <button

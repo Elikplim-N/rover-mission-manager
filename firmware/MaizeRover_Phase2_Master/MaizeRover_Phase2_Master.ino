@@ -1,6 +1,14 @@
 /*
   Maize Rover: Phase 2 Master Firmware (Arduino Uno R4 WiFi)
-  Local-First Mission Control with Optional Cloud Sync for Analysis
+  Local-First Mission Control, No Internet Required in the Field
+
+  The rover hosts its own WiFi network (Access Point mode) at a fixed address,
+  192.168.4.1, instead of joining a farm/phone hotspot. A phone or laptop
+  connects directly to that network and talks to the rover over the LAN — there
+  is no dependency on mobile data, a nearby router, or a phone's hotspot staying
+  awake. Completed missions are logged on the connecting device and can be
+  pushed to the cloud afterward, from the app, whenever a connection happens to
+  be available; the rover itself never needs one.
 
   Operational State Machine:
   [BOOT] -> [IDLE: awaiting config/start] -> [AUTO: mission running] <---> [PAUSED]
@@ -15,8 +23,6 @@
   - Status endpoint returns the latest telemetry snapshot and mission progress so a
     companion app on the same local network can poll and log data on-device, with
     no internet connection required
-  - Cloud telemetry push to the Dokploy Ingestion API is optional (off by default)
-    and only used for later analysis when a connection happens to be available
   - Immediate Remote E-Stop override (Zero PWM, pump kill, acoustic alarm)
   - Manual Directional Nudge (Forward, Reverse, Left, Right, Stop) with 600ms deadman timeout
   - Actuator Diagnostic Test Bench (Single Seed Pulse, Water Dose 400ms, Arm Toggle)
@@ -48,21 +54,18 @@ enum RoverMode {
 RoverMode currentMode = MODE_IDLE;
 
 // =========================================================================
-// NETWORK & CLOUD INGESTION CONFIGURATION
+// NETWORK CONFIGURATION (Access Point mode)
 // =========================================================================
-const char* WIFI_SSID     = "Your_Farm_WiFi_or_Hotspot";
-const char* WIFI_PASS     = "Your_WiFi_Password";
-
-// Cloud Ingestion Target (Vercel Serverless connected to PostgreSQL)
-const char* CLOUD_HOST    = "rover-mission-manager-iota.vercel.app";
-const int   CLOUD_PORT    = 443;
-const bool  USE_HTTPS     = true; // True for Vercel HTTPS (Port 443), False for plain HTTP (Port 80/custom)
-const char* MISSION_ID    = "active-field-run";
+// The rover hosts its own network rather than joining one, so the connecting
+// phone/laptop always finds it at the same address (192.168.4.1, assigned by
+// the WiFiS3 library's default AP configuration) with no router or mobile
+// hotspot involved. Change the password below before field deployment;
+// WPA2 requires 8-63 characters.
+const char* AP_SSID       = "MaizeRover-Field01";
+const char* AP_PASSWORD   = "PlantMaize1";
 
 // Embedded Command Server for Local Subnet Teleop & E-Stop
 WiFiServer cmdServer(8080);
-WiFiClient wifiClient;
-WiFiSSLClient sslClient;
 
 // =========================================================================
 // I2C ADDRESSES
@@ -108,7 +111,6 @@ const unsigned long DRIVE_DEADMAN_TIMEOUT = 600; // Auto-stop motors after 600ms
 // Mission lifecycle state
 bool missionActive     = false; // true once start_mission has been called
 bool missionComplete   = false; // true once TOTAL_ROWS has been fully covered
-bool cloudSyncEnabled  = false; // Off by default: local-first, cloud push is optional
 
 // Objects
 TinyGPSPlus gps;
@@ -122,7 +124,6 @@ int currentRow = 1;
 int currentDrop = 0;
 float baselineAltitude = 0.0;
 unsigned long lastDropTime = 0;
-unsigned long lastWiFiRetry = 0;
 unsigned long lastDriveCommandTime = 0;
 bool isArmDeployed = false;
 
@@ -194,8 +195,8 @@ void setup() {
     baselineAltitude = altSum / 12.0;
   }
 
-  // Connect Wi-Fi & Launch Command Server
-  connectWiFi();
+  // Host the local Access Point & Launch Command Server
+  setupAccessPoint();
   cmdServer.begin();
 
   // Acoustic Ready Chime
@@ -217,16 +218,10 @@ void loop() {
     gps.encode(Serial1.read());
   }
 
-  // 2. Wi-Fi reconnection guardian
-  if (WiFi.status() != WL_CONNECTED && millis() - lastWiFiRetry > 10000) {
-    lastWiFiRetry = millis();
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-  }
-
-  // 3. Process Remote Teleop & E-Stop HTTP Commands
+  // 2. Process Remote Teleop & E-Stop HTTP Commands
   handleIncomingCommands();
 
-  // 4. State Machine Branching
+  // 3. State Machine Branching
   switch (currentMode) {
     case MODE_ESTOP:
       // Safety Lockdown: 0% PWM, forced pump cut
@@ -407,11 +402,10 @@ void handleIncomingCommands() {
     v = getParam(req, "moist");    if (v.length()) MOIST_THRESHOLD = v.toInt();
     v = getParam(req, "speed");    if (v.length()) BASE_SPEED = v.toInt();
     v = getParam(req, "turn");     if (v.length()) TURN_SPEED = v.toInt();
-    v = getParam(req, "cloud");    if (v.length()) cloudSyncEnabled = (v == "1");
     Serial.println("[CONFIG] rows=" + String(TOTAL_ROWS) + " drops=" + String(DROPS_PER_ROW) +
                     " dropDist=" + String(DROP_SPACING_M) + " rowGap=" + String(ROW_SPACING_M) +
                     " moist=" + String(MOIST_THRESHOLD) + " speed=" + String(BASE_SPEED) +
-                    " turn=" + String(TURN_SPEED) + " cloud=" + String(cloudSyncEnabled));
+                    " turn=" + String(TURN_SPEED));
   }
   else if (action == "start_mission" && currentMode != MODE_ESTOP) {
     currentRow = 1;
@@ -548,7 +542,7 @@ void actuateSeedDrop() {
 }
 
 // =========================================================================
-// PLANTING & CLOUD TELEMETRY PIPELINE
+// PLANTING & LOCAL TELEMETRY PIPELINE
 // =========================================================================
 void executePlantingDrop() {
   currentDrop++;
@@ -623,87 +617,30 @@ void executePlantingDrop() {
 
   // 2. Update the latest-telemetry snapshot for the local /cmd?action=status
   //    endpoint, so a companion app on the same network can poll it and log
-  //    each drop on-device without needing any cloud connection.
+  //    each drop on-device. This is the only telemetry sink the rover itself
+  //    writes to; pushing a completed mission to the cloud for analysis is
+  //    done afterward, from the app, whenever it has an internet connection.
   telemetrySeq++;
   lastSynX = synX; lastSynY = synY; lastVolt = volt; lastTempC = tempC; lastHum = hum;
   lastPress = press; lastElev = elev; lastMoist = moist; lastWatered = watered;
   lastAbsHead = absHead; lastErr = err; lastPitch = pitch; lastRoll = roll;
   lastLat = lat; lastLng = lng; lastSats = sats; lastObsDist = obsDist;
-
-  // 3. Optionally push to the Dokploy cloud API, only when a connection is
-  //    expected to be available; this is for later analysis and is never
-  //    required for the mission itself to run or be logged locally.
-  if (cloudSyncEnabled) {
-    streamToDokployCloud(currentRow, currentDrop, synX, synY, volt, tempC, hum, press, elev, moist, watered, absHead, err, pitch, roll, lat, lng, sats, obsDist);
-  }
-}
-
-void streamToDokployCloud(int row, int drop, float synX, float synY, float volt, float tempC, float hum, float press, float elev, int moist, bool watered, float absHead, float err, float pitch, float roll, float lat, float lng, int sats, float obsDist) {
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  Client* clientPtr = USE_HTTPS ? (Client*)&sslClient : (Client*)&wifiClient;
-
-  if (clientPtr->connect(CLOUD_HOST, CLOUD_PORT)) {
-    String jsonPayload = "{\"missionId\":\"" + String(MISSION_ID) + "\"" +
-                         ",\"row\":" + String(row) +
-                         ",\"drop\":" + String(drop) +
-                         ",\"synX\":" + String(synX, 2) +
-                         ",\"synY\":" + String(synY, 2) +
-                         ",\"volt\":" + String(volt, 2) +
-                         ",\"tempC\":" + String(tempC, 1) +
-                         ",\"hum\":" + String(hum, 1) +
-                         ",\"press\":" + String(press, 1) +
-                         ",\"elev\":" + String(elev, 2) +
-                         ",\"moist\":" + String(moist) +
-                         ",\"watered\":" + (watered ? "true" : "false") +
-                         ",\"absHead\":" + String(absHead, 1) +
-                         ",\"err\":" + String(err, 1) +
-                         ",\"pitch\":" + String(pitch, 1) +
-                         ",\"roll\":" + String(roll, 1) +
-                         ",\"lat\":" + String(lat, 6) +
-                         ",\"lng\":" + String(lng, 6) +
-                         ",\"sats\":" + String(sats) +
-                         ",\"obsDist\":" + String(obsDist, 1) + "}";
-
-    clientPtr->println("POST /api/telemetry HTTP/1.1");
-    clientPtr->println("Host: " + String(CLOUD_HOST));
-    clientPtr->println("Content-Type: application/json");
-    clientPtr->println("Content-Length: " + String(jsonPayload.length()));
-    clientPtr->println("Connection: close");
-    clientPtr->println();
-    clientPtr->println(jsonPayload);
-
-    // Read piggybacked command from cloud response (e.g. Remote E-Stop)
-    unsigned long timeout = millis() + 600;
-    while (clientPtr->connected() && millis() < timeout) {
-      if (clientPtr->available()) {
-        String line = clientPtr->readStringUntil('\n');
-        if (line.indexOf("\"estop\"") != -1 && currentMode != MODE_ESTOP) {
-          currentMode = MODE_ESTOP;
-          stopMotors();
-          digitalWrite(PUMP_RELAY_PIN, HIGH);
-          tone(BUZZER_PIN, 1200, 500);
-          Serial.println(F("[CLOUD ESTOP] Preemptive E-Stop received from cloud telemetry!"));
-        }
-      }
-    }
-    
-    clientPtr->stop();
-  }
 }
 
 // =========================================================================
 // HARDWARE SENSORS & DRIVERS
 // =========================================================================
-void connectWiFi() {
+void setupAccessPoint() {
   if (WiFi.status() == WL_NO_MODULE) return;
 
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 8) {
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    delay(2000);
-    attempts++;
-  }
+  WiFi.beginAP(AP_SSID, AP_PASSWORD);
+  delay(1000); // Let the AP interface come up before the command server binds to it
+
+  Serial.print(F("[WIFI] Hosting access point \""));
+  Serial.print(AP_SSID);
+  Serial.println(F("\""));
+  Serial.print(F("[WIFI] Connect to it, then reach the rover at http://"));
+  Serial.println(WiFi.localIP());
 }
 
 float readUltrasonicCM() {

@@ -27,7 +27,9 @@ export function getDokployConfig(): DokployConfig {
     serverUrl: defaultUrl,
     autoSync: false,
     apiKey: '',
-    directRoverIp: ''
+    // The rover hosts its own WiFi network and always comes up at this fixed
+    // address, so a fresh install works as soon as the phone/laptop joins it.
+    directRoverIp: '192.168.4.1'
   };
 }
 

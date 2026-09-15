@@ -202,7 +202,7 @@ export default function Teleop() {
         <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 p-4 rounded-xl shadow-xs space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-gray-800 dark:text-gray-200">
-              Direct Rover Subnet IP (Optional Low-Latency Link)
+              Rover WiFi Address
             </span>
             <button onClick={() => setShowIpConfig(false)} className="text-xs text-gray-400 hover:text-gray-600">Close</button>
           </div>
@@ -211,7 +211,7 @@ export default function Teleop() {
               type="text"
               value={directIp}
               onChange={(e) => setDirectIp(e.target.value)}
-              placeholder="e.g. 192.168.4.1 or 192.168.1.150"
+              placeholder="192.168.4.1"
               className="text-xs font-mono border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-3 py-1.5 rounded-md text-gray-900 dark:text-white flex-1"
             />
             <button
@@ -222,7 +222,7 @@ export default function Teleop() {
             </button>
           </div>
           <p className="text-[11px] text-gray-400">
-            If left empty or unreachable, all commands transparently relay through your Dokploy Cloud server.
+            The rover hosts its own WiFi network and always comes up at 192.168.4.1. If unreachable, commands fall back to your Dokploy Cloud server.
           </p>
         </div>
       )}
