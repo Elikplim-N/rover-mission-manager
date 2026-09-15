@@ -477,7 +477,9 @@ void handleIncomingCommands() {
   client.println("Connection: close");
   client.println("Content-Length: " + String(resp.length()));
   client.println();
-  client.println(resp);
+  client.print(resp); // print, not println: Content-Length above must match the body exactly
+  client.flush();     // ensure the body is actually sent over the air before the socket closes
+  delay(1);
   client.stop();
 }
 
