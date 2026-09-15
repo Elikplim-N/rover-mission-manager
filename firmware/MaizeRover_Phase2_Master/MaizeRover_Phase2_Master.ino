@@ -412,7 +412,7 @@ void executePlantingDrop() {
   }
 
   float rawVolt = analogRead(VOLTAGE_PIN);
-  float volt = (rawVolt * (5.0 / 1023.0)) * 2.0;
+  float volt = (rawVolt * (5.0 / 1023.0)) * 5.0; // B25 voltage sensor module, 5:1 divider (0-25V range)
 
   float pitch = 0.0, roll = 0.0;
   readMPU6050(pitch, roll);

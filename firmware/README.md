@@ -41,7 +41,7 @@ This firmware implements a **Pure Cloud-First IoT Architecture**. Rather than re
 | :--- | :--- | :--- |
 | **A4 (SDA) / A5 (SCL)**| I2C Bus | BME280 (`0x76`), MPU-6050 (`0x68`), Compass (`0x1E`) |
 | **A0** | Analog | Soil Moisture Probe |
-| **A1** | Analog | Rover Battery Voltage Divider (10k/10k) |
+| **A1** | Analog | Rover Battery Voltage Divider (B25 module, 5:1, 0-25V) |
 | **A2 / A3** | GPIO / Timer | Ultrasonic HC-SR04 Trigger & Echo |
 | **D3 / D5** | PWM | Left Motor RPWM / LPWM |
 | **D4** | Digital Output | Left Motor Enable (`HIGH`) |
