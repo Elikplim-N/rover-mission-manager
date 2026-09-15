@@ -67,8 +67,8 @@ export default function Teleop() {
         } else {
           setRoverMode('MANUAL');
         }
-        setLastSource(res.source || 'cloud');
-        setFeedback(`Command "${action}" dispatched via ${res.source === 'direct' ? 'Direct LAN' : 'Dokploy Cloud'}`);
+        setLastSource(res.source || 'direct');
+        setFeedback(`Command "${action}" dispatched to rover`);
       } else {
         setFeedback(`Command failed: ${res.error}`);
       }
@@ -222,7 +222,7 @@ export default function Teleop() {
             </button>
           </div>
           <p className="text-[11px] text-gray-400">
-            The rover hosts its own WiFi network and always comes up at 192.168.4.1. If unreachable, commands fall back to your Dokploy Cloud server.
+            The rover hosts its own WiFi network and always comes up at 192.168.4.1. Commands only work while this device is connected to that network.
           </p>
         </div>
       )}
