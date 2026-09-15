@@ -48,19 +48,21 @@ enum RoverMode {
 RoverMode currentMode = MODE_IDLE;
 
 // =========================================================================
-// NETWORK & DOKPLOY SERVER CONFIGURATION
+// NETWORK & CLOUD INGESTION CONFIGURATION
 // =========================================================================
 const char* WIFI_SSID     = "Your_Farm_WiFi_or_Hotspot";
 const char* WIFI_PASS     = "Your_WiFi_Password";
 
-// Dokploy Cloud API Host (PostgreSQL 18.6 backend)
-const char* DOKPLOY_HOST  = "178.105.184.157";
-const int   DOKPLOY_PORT  = 3001;
+// Cloud Ingestion Target (Vercel Serverless connected to PostgreSQL)
+const char* CLOUD_HOST    = "rover-mission-manager-iota.vercel.app";
+const int   CLOUD_PORT    = 443;
+const bool  USE_HTTPS     = true; // True for Vercel HTTPS (Port 443), False for plain HTTP (Port 80/custom)
 const char* MISSION_ID    = "active-field-run";
 
 // Embedded Command Server for Local Subnet Teleop & E-Stop
 WiFiServer cmdServer(8080);
 WiFiClient wifiClient;
+WiFiSSLClient sslClient;
 
 // =========================================================================
 // I2C ADDRESSES
@@ -92,13 +94,14 @@ WiFiClient wifiClient;
 // FIELD GEOMETRY & TUNING (runtime-configurable via /cmd?action=config...)
 // =========================================================================
 #define NUM_LEDS           8
-int   BASE_SPEED      = 190;
-int   TURN_SPEED      = 150;
-float DROP_SPACING_M  = 0.25;
-float ROW_SPACING_M   = 0.75;
-int   DROPS_PER_ROW   = 20;
-int   TOTAL_ROWS      = 10;
-int   MOIST_THRESHOLD = 450;
+const int   BASE_SPEED     = 200; 
+const int   TURN_SPEED     = 170; 
+const bool  LEFT_INVERT    = false;
+const bool  RIGHT_INVERT   = true;  // Opposing motor mounted on right chassis
+const float DROP_SPACING_M = 0.25;
+const float ROW_SPACING_M  = 0.75;
+const int   DROPS_PER_ROW  = 20;
+const int   MOIST_THRESHOLD= 450;
 const unsigned long DRIVE_DEADMAN_TIMEOUT = 600; // Auto-stop motors after 600ms of silence
 
 // Mission lifecycle state
@@ -340,6 +343,7 @@ void handleIncomingCommands() {
   // Execute Command
   if (action == "estop") {
     currentMode = MODE_ESTOP;
+    enableDrivers(false);
     stopMotors();
     digitalWrite(PUMP_RELAY_PIN, HIGH);
     tone(BUZZER_PIN, 1200, 500);
@@ -347,6 +351,7 @@ void handleIncomingCommands() {
   }
   else if (action == "clear_estop") {
     currentMode = MODE_MANUAL;
+    enableDrivers(true);
     stopMotors();
     noTone(BUZZER_PIN);
     Serial.println("[ESTOP] Cleared to MANUAL mode.");
@@ -484,39 +489,55 @@ void handleIncomingCommands() {
 // =========================================================================
 // MOTOR DRIVE FUNCTIONS
 // =========================================================================
+void enableDrivers(bool enable) {
+  uint8_t state = enable ? HIGH : LOW;
+  digitalWrite(MOTOR_LEFT_EN, state);
+  digitalWrite(MOTOR_RIGHT_EN, state);
+}
+
+void driveSide(uint8_t rpwmPin, uint8_t lpwmPin, int speed, bool invert) {
+  if (invert) speed = -speed;
+  speed = constrain(speed, -255, 255);
+
+  if (speed > 0) {
+    analogWrite(lpwmPin, 0);
+    analogWrite(rpwmPin, speed);
+  } else if (speed < 0) {
+    analogWrite(rpwmPin, 0);
+    analogWrite(lpwmPin, -speed);
+  } else {
+    analogWrite(rpwmPin, 0);
+    analogWrite(lpwmPin, 0);
+  }
+}
+
 void driveForward() {
-  analogWrite(MOTOR_LEFT_RPWM, BASE_SPEED);
-  analogWrite(MOTOR_LEFT_LPWM, 0);
-  analogWrite(MOTOR_RIGHT_RPWM, BASE_SPEED);
-  analogWrite(MOTOR_RIGHT_LPWM, 0);
+  enableDrivers(true);
+  driveSide(MOTOR_LEFT_RPWM, MOTOR_LEFT_LPWM, BASE_SPEED, LEFT_INVERT);
+  driveSide(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, BASE_SPEED, RIGHT_INVERT);
 }
 
 void driveReverse() {
-  analogWrite(MOTOR_LEFT_RPWM, 0);
-  analogWrite(MOTOR_LEFT_LPWM, BASE_SPEED);
-  analogWrite(MOTOR_RIGHT_RPWM, 0);
-  analogWrite(MOTOR_RIGHT_LPWM, BASE_SPEED);
+  enableDrivers(true);
+  driveSide(MOTOR_LEFT_RPWM, MOTOR_LEFT_LPWM, -BASE_SPEED, LEFT_INVERT);
+  driveSide(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, -BASE_SPEED, RIGHT_INVERT);
 }
 
 void pivotLeft() {
-  analogWrite(MOTOR_LEFT_RPWM, 0);
-  analogWrite(MOTOR_LEFT_LPWM, TURN_SPEED);
-  analogWrite(MOTOR_RIGHT_RPWM, TURN_SPEED);
-  analogWrite(MOTOR_RIGHT_LPWM, 0);
+  enableDrivers(true);
+  driveSide(MOTOR_LEFT_RPWM, MOTOR_LEFT_LPWM, -TURN_SPEED, LEFT_INVERT);
+  driveSide(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, TURN_SPEED, RIGHT_INVERT);
 }
 
 void pivotRight() {
-  analogWrite(MOTOR_LEFT_RPWM, TURN_SPEED);
-  analogWrite(MOTOR_LEFT_LPWM, 0);
-  analogWrite(MOTOR_RIGHT_RPWM, 0);
-  analogWrite(MOTOR_RIGHT_LPWM, TURN_SPEED);
+  enableDrivers(true);
+  driveSide(MOTOR_LEFT_RPWM, MOTOR_LEFT_LPWM, TURN_SPEED, LEFT_INVERT);
+  driveSide(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, -TURN_SPEED, RIGHT_INVERT);
 }
 
 void stopMotors() {
-  analogWrite(MOTOR_LEFT_RPWM, 0);
-  analogWrite(MOTOR_LEFT_LPWM, 0);
-  analogWrite(MOTOR_RIGHT_RPWM, 0);
-  analogWrite(MOTOR_RIGHT_LPWM, 0);
+  driveSide(MOTOR_LEFT_RPWM, MOTOR_LEFT_LPWM, 0, false);
+  driveSide(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, 0, false);
 }
 
 void actuateSeedDrop() {
@@ -619,7 +640,9 @@ void executePlantingDrop() {
 void streamToDokployCloud(int row, int drop, float synX, float synY, float volt, float tempC, float hum, float press, float elev, int moist, bool watered, float absHead, float err, float pitch, float roll, float lat, float lng, int sats, float obsDist) {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  if (wifiClient.connect(DOKPLOY_HOST, DOKPLOY_PORT)) {
+  Client* clientPtr = USE_HTTPS ? (Client*)&sslClient : (Client*)&wifiClient;
+
+  if (clientPtr->connect(CLOUD_HOST, CLOUD_PORT)) {
     String jsonPayload = "{\"missionId\":\"" + String(MISSION_ID) + "\"" +
                          ",\"row\":" + String(row) +
                          ",\"drop\":" + String(drop) +
@@ -641,15 +664,30 @@ void streamToDokployCloud(int row, int drop, float synX, float synY, float volt,
                          ",\"sats\":" + String(sats) +
                          ",\"obsDist\":" + String(obsDist, 1) + "}";
 
-    wifiClient.println("POST /api/telemetry HTTP/1.1");
-    wifiClient.println("Host: " + String(DOKPLOY_HOST) + ":" + String(DOKPLOY_PORT));
-    wifiClient.println("Content-Type: application/json");
-    wifiClient.println("Content-Length: " + String(jsonPayload.length()));
-    wifiClient.println("Connection: close");
-    wifiClient.println();
-    wifiClient.println(jsonPayload);
+    clientPtr->println("POST /api/telemetry HTTP/1.1");
+    clientPtr->println("Host: " + String(CLOUD_HOST));
+    clientPtr->println("Content-Type: application/json");
+    clientPtr->println("Content-Length: " + String(jsonPayload.length()));
+    clientPtr->println("Connection: close");
+    clientPtr->println();
+    clientPtr->println(jsonPayload);
+
+    // Read piggybacked command from cloud response (e.g. Remote E-Stop)
+    unsigned long timeout = millis() + 600;
+    while (clientPtr->connected() && millis() < timeout) {
+      if (clientPtr->available()) {
+        String line = clientPtr->readStringUntil('\n');
+        if (line.indexOf("\"estop\"") != -1 && currentMode != MODE_ESTOP) {
+          currentMode = MODE_ESTOP;
+          stopMotors();
+          digitalWrite(PUMP_RELAY_PIN, HIGH);
+          tone(BUZZER_PIN, 1200, 500);
+          Serial.println(F("[CLOUD ESTOP] Preemptive E-Stop received from cloud telemetry!"));
+        }
+      }
+    }
     
-    wifiClient.stop();
+    clientPtr->stop();
   }
 }
 

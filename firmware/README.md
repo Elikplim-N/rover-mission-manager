@@ -56,12 +56,13 @@ This firmware implements a **Pure Cloud-First IoT Architecture**. Rather than re
 
 ---
 
-## Dokploy Cloud Ingestion Configuration
+## Cloud Telemetry Ingestion Configuration
 
 In `MaizeRover_Phase2_Master.ino`:
 ```cpp
 const char* WIFI_SSID     = "Your_Farm_WiFi_or_Hotspot";
 const char* WIFI_PASS     = "Your_WiFi_Password";
-const char* DOKPLOY_HOST  = "178.105.184.157"; // Dokploy server host
-const int   DOKPLOY_PORT  = 3001;              // Dokploy API port
+const char* CLOUD_HOST    = "rover-mission-manager-iota.vercel.app"; // Cloud API host
+const int   CLOUD_PORT    = 443;                                     // Port 443 (HTTPS) or 80 (HTTP)
+const bool  USE_HTTPS     = true;                                    // WiFiSSLClient enabled for Vercel
 ```

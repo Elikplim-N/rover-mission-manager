@@ -218,10 +218,13 @@ export async function sendRoverCommand(action: RoverAction, params: Record<strin
     });
 
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      return { ok: false, error: `HTTP ${res.status}: ${res.statusText}` };
     }
 
     const data = await res.json();
+    if (data.offline || data.ok === false) {
+      return { ok: false, error: data.error || data.message || 'Cloud relay is offline.' };
+    }
     return { ok: true, mode: data.mode, source: 'cloud' };
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
@@ -258,20 +261,24 @@ export async function fetchRoverStatus(): Promise<{ ok: boolean; status?: RoverS
 export async function fetchRoverCommandState(): Promise<{
   command?: { action: string; timestamp: string };
   roverState?: { mode: string; lastSeen: string | null; volt: number | null };
+  offline?: boolean;
   error?: string;
 }> {
   const config = getDokployConfig();
-  if (!config.serverUrl) return { error: 'No server URL' };
+  if (!config.serverUrl) return { offline: true, error: 'No server URL' };
 
   try {
     const url = config.serverUrl.replace(/\/+$/, '');
     const res = await fetch(`${url}/api/command`, {
+      headers: { Accept: 'application/json' },
       signal: AbortSignal.timeout(2500)
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      return { offline: true, error: `HTTP ${res.status}` };
+    }
     return await res.json();
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-    return { error: errorMsg };
+    return { offline: true, error: errorMsg };
   }
 }
