@@ -94,14 +94,15 @@ WiFiSSLClient sslClient;
 // FIELD GEOMETRY & TUNING (runtime-configurable via /cmd?action=config...)
 // =========================================================================
 #define NUM_LEDS           8
-const int   BASE_SPEED     = 200; 
-const int   TURN_SPEED     = 170; 
+int         BASE_SPEED     = 200;
+int         TURN_SPEED     = 170;
 const bool  LEFT_INVERT    = false;
 const bool  RIGHT_INVERT   = true;  // Opposing motor mounted on right chassis
-const float DROP_SPACING_M = 0.25;
-const float ROW_SPACING_M  = 0.75;
-const int   DROPS_PER_ROW  = 20;
-const int   MOIST_THRESHOLD= 450;
+float       DROP_SPACING_M = 0.25;
+float       ROW_SPACING_M  = 0.75;
+int         DROPS_PER_ROW  = 20;
+int         TOTAL_ROWS     = 10;
+int         MOIST_THRESHOLD= 450;
 const unsigned long DRIVE_DEADMAN_TIMEOUT = 600; // Auto-stop motors after 600ms of silence
 
 // Mission lifecycle state
