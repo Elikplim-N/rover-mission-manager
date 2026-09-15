@@ -33,9 +33,15 @@ export default function Teleop() {
   // IP config for direct low-latency LAN teleop
   const [directIp, setDirectIp] = useState<string>(getDokployConfig().directRoverIp || '');
   const [showIpConfig, setShowIpConfig] = useState<boolean>(false);
+  const [cloudConnected, setCloudConnected] = useState<boolean | null>(null);
 
   const syncState = useCallback(async () => {
     const data = await fetchRoverCommandState();
+    if (data.offline || data.error) {
+      setCloudConnected(false);
+    } else {
+      setCloudConnected(true);
+    }
     if (data.roverState?.mode) {
       setRoverMode(data.roverState.mode as 'AUTO' | 'MANUAL' | 'ESTOP');
     }
@@ -43,9 +49,10 @@ export default function Teleop() {
 
   useEffect(() => {
     syncState();
-    const interval = setInterval(syncState, 3000);
+    const intervalMs = cloudConnected === false ? 15000 : 3000;
+    const interval = setInterval(syncState, intervalMs);
     return () => clearInterval(interval);
-  }, [syncState]);
+  }, [syncState, cloudConnected]);
 
   const handleCommand = useCallback(async (action: RoverAction) => {
     setDispatching(true);
@@ -123,11 +130,39 @@ export default function Teleop() {
           </p>
         </div>
 
-        {/* State Badge & Direct IP Toggle */}
-        <div className="flex items-center gap-3">
+        {/* State Badge, Link Badge & Direct IP Toggle */}
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* Link Status Indicator */}
+          <div
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 border ${
+              directIp
+                ? 'bg-blue-50 text-blue-800 border-blue-200 dark:bg-blue-950/40 dark:text-blue-300 dark:border-blue-800'
+                : cloudConnected === true
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800'
+                : 'bg-gray-100 text-gray-700 border-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-700'
+            }`}
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${
+                directIp
+                  ? 'bg-blue-500 animate-pulse'
+                  : cloudConnected === true
+                  ? 'bg-emerald-500 animate-pulse'
+                  : 'bg-amber-500'
+              }`}
+            />
+            <span>
+              {directIp
+                ? `LAN (${directIp})`
+                : cloudConnected === true
+                ? 'Cloud Relay Online'
+                : 'Standalone / Cloud Standby'}
+            </span>
+          </div>
+
           <button
             onClick={() => setShowIpConfig(!showIpConfig)}
-            className="text-xs border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 py-1.5 px-3 rounded-lg flex items-center gap-1.5 hover:bg-gray-50 dark:hover:bg-gray-700"
+            className="text-xs border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 py-1.5 px-3 rounded-lg flex items-center gap-1.5 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer"
           >
             <Wifi className="w-3.5 h-3.5 text-blue-500" />
             <span>LAN Direct IP</span>
