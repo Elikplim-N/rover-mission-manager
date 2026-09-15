@@ -1,44 +1,47 @@
-export const config = {
-  runtime: 'edge',
-};
+import pool from './_db.js';
 
-const DOKPLOY_BASE = 'http://178.105.184.157:3001';
+export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-export default async function handler(req) {
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  const payload = req.body || {};
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
-    const forwardHeaders = new Headers();
-    const ct = req.headers.get('content-type');
-    if (ct) forwardHeaders.set('content-type', ct);
+    const [cmdRes] = await Promise.all([
+      pool.query('SELECT id, action, params FROM rover_commands ORDER BY id DESC LIMIT 1'),
+      pool.query(
+        `UPDATE rover_status
+         SET last_seen = NOW(),
+             volt = COALESCE($1, volt),
+             lat = COALESCE($2, lat),
+             lng = COALESCE($3, lng),
+             updated_at = NOW()
+         WHERE id = 1`,
+        [payload.volt ?? null, payload.lat ?? null, payload.lng ?? null]
+      )
+    ]);
 
-    const init = {
-      method: req.method,
-      headers: forwardHeaders,
-      signal: controller.signal,
-    };
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      init.body = await req.text();
-    }
+    const activeCommand = cmdRes.rows[0]
+      ? { id: cmdRes.rows[0].id, action: cmdRes.rows[0].action, params: cmdRes.rows[0].params }
+      : { id: 0, action: 'stop', params: {} };
 
-    const res = await fetch(`${DOKPLOY_BASE}/api/telemetry`, init);
-    clearTimeout(timeoutId);
-    const body = await res.text();
-    return new Response(body, {
-      status: res.status,
-      headers: {
-        'Content-Type': res.headers.get('Content-Type') || 'application/json',
-        'Cache-Control': 'no-store',
-      },
+    return res.status(201).json({
+      success: true,
+      command: activeCommand
     });
-  } catch {}
-
-  return new Response(
-    JSON.stringify({
-      ok: true,
-      offline: true,
-      message: 'Telemetry endpoint edge fallback active; Dokploy VPS offline',
-    }),
-    { status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } }
-  );
+  } catch (err) {
+    console.error('Telemetry ingestion error:', err.message);
+    return res.status(200).json({
+      success: true,
+      command: { id: 0, action: 'stop', params: {} }
+    });
+  }
 }

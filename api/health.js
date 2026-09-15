@@ -1,34 +1,27 @@
-export const config = {
-  runtime: 'edge',
-};
+import pool from './_db.js';
 
-const DOKPLOY_BASE = 'http://178.105.184.157:3001';
+export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cache-Control', 'no-store');
 
-export default async function handler() {
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1500);
-    const res = await fetch(`${DOKPLOY_BASE}/api/health`, { signal: controller.signal });
-    clearTimeout(timeoutId);
-    if (res.ok) {
-      const data = await res.json();
-      return new Response(JSON.stringify(data), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-      });
-    }
-  } catch {}
-
-  return new Response(
-    JSON.stringify({
-      status: 'standby',
-      cloudRelay: 'offline',
-      mode: 'edge-fallback',
-      version: '1.1.0-edge',
-    }),
-    {
-      status: 200,
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-    }
-  );
+    const dbRes = await pool.query('SELECT NOW() as db_time, current_database() as db_name');
+    return res.status(200).json({
+      status: 'ok',
+      service: 'rover-mission-manager-serverless',
+      version: '1.2.0',
+      database: 'connected',
+      db: dbRes.rows[0],
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    return res.status(200).json({
+      status: 'degraded',
+      service: 'rover-mission-manager-serverless',
+      version: '1.2.0',
+      database: 'disconnected',
+      error: err.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 }
