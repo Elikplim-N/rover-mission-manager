@@ -1,38 +1,26 @@
 /*
  * =========================================================================
  * Straight Line Motor Diagnostic Test (Dual BTS7960 / IBT-2 / L298N)
- * Target: Arduino Uno R4 WiFi / Arduino Uno R3
+ * Target: Arduino Uno R4 WiFi / Uno R3
+ * 
+ * FIXED HARDWARE WIRING:
+ *  - Left Driver:   RPWM = 3, LPWM = 5, EN = 4
+ *  - Right Driver:  RPWM = 6, LPWM = 9, EN = 8
  * 
  * Test Routine:
  *  - 5-cycle Straight Line Test:
  *      1. Drive STRAIGHT FORWARD for 2.0 seconds
- *      2. STOP for 1.5 seconds
+ *      2. Full STOP for 1.5 seconds
  *      3. Repeat exactly 5 times
- *  - Full safe shutdown when finished.
+ *  - Complete safe shutdown when finished.
  * 
- * Open Serial Monitor at 115200 baud to monitor each cycle.
+ * Open Serial Monitor at 115200 baud to follow along.
  * =========================================================================
  */
 
 // =========================================================================
-// 1. PIN CONFIGURATION
+// 1. FIXED PIN DEFINITIONS (DO NOT CHANGE - MATCHED TO YOUR HARDWARE)
 // =========================================================================
-
-// --- CONFIGURATION A: Standard Dual BTS7960 (from rover_square_test) ---
-// If your rover is wired with this setup (Default):
-const uint8_t L_RPWM = 10;
-const uint8_t L_LPWM = 11;
-const uint8_t L_R_EN = 12;
-const uint8_t L_L_EN = 13;
-
-const uint8_t R_RPWM = 5;
-const uint8_t R_LPWM = 6;
-const uint8_t R_R_EN = 7;
-const uint8_t R_L_EN = 8;
-
-/*
-// --- CONFIGURATION B: Phase 2 Master Pinout ---
-// (Uncomment this block and comment CONFIGURATION A if using Phase 2 wiring):
 const uint8_t L_RPWM = 3;
 const uint8_t L_LPWM = 5;
 const uint8_t L_R_EN = 4;
@@ -42,21 +30,20 @@ const uint8_t R_RPWM = 6;
 const uint8_t R_LPWM = 9;
 const uint8_t R_R_EN = 8;
 const uint8_t R_L_EN = 8;
-*/
 
 // =========================================================================
-// 2. MOTOR TUNING & INVERSION
+// 2. MOTOR PARAMETERS & INVERSION
 // =========================================================================
-// On rovers, motors face opposing directions. One side usually needs inversion.
+// If either side spins in reverse during forward test, toggle its invert flag
 const bool LEFT_INVERT  = false;
-const bool RIGHT_INVERT = true;   // Flip to false if right side spins backward
+const bool RIGHT_INVERT = true;  // Opposing motor mounted on right chassis
 
-// Drive Speed: 0 (stop) to 255 (max). 180 provides good starting torque.
-const int DRIVE_SPEED = 180;
+// Speed: 0 (stopped) to 255 (max). 200 provides strong torque.
+const int DRIVE_SPEED = 200;
 
 const int TOTAL_CYCLES       = 5;
 const unsigned long RUN_MS   = 2000; // 2.0 seconds forward
-const unsigned long PAUSE_MS = 1500; // 1.5 seconds pause
+const unsigned long PAUSE_MS = 1500; // 1.5 seconds stop
 
 // =========================================================================
 // 3. LOW-LEVEL MOTOR DRIVER FUNCTIONS
@@ -97,24 +84,24 @@ void stopMotors() {
 }
 
 // =========================================================================
-// 4. SETUP & INITIALIZATION
+// 4. SETUP & TEST EXECUTION
 // =========================================================================
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(1200);
 
-  Serial.println(F("\n========================================="));
+  Serial.println(F("\n============================================="));
   Serial.println(F("  STRAIGHT LINE MOTOR TEST (5 CYCLES)"));
-  Serial.println(F("========================================="));
-  Serial.println(F("Parameters:"));
-  Serial.print(F("  - Speed: ")); Serial.println(DRIVE_SPEED);
-  Serial.print(F("  - Forward Duration: ")); Serial.print(RUN_MS / 1000.0, 1); Serial.println(F(" s"));
-  Serial.print(F("  - Pause Duration:   ")); Serial.print(PAUSE_MS / 1000.0, 1); Serial.println(F(" s"));
-  Serial.print(F("  - Total Cycles:     ")); Serial.println(TOTAL_CYCLES);
-  Serial.println(F("-----------------------------------------"));
+  Serial.println(F("  FIXED PINOUT: Left=3,5 (EN=4) | Right=6,9 (EN=8)"));
+  Serial.println(F("============================================="));
+  Serial.print(F("Parameters: Speed=")); Serial.print(DRIVE_SPEED);
+  Serial.print(F(" | Run=")); Serial.print(RUN_MS / 1000.0, 1);
+  Serial.print(F("s | Pause=")); Serial.print(PAUSE_MS / 1000.0, 1);
+  Serial.print(F("s | Cycles=")); Serial.println(TOTAL_CYCLES);
+  Serial.println(F("---------------------------------------------"));
 
-  // Configure Output Pins
+  // 1. Initialize Driver Pins as Outputs
   pinMode(L_RPWM, OUTPUT);
   pinMode(L_LPWM, OUTPUT);
   pinMode(L_R_EN, OUTPUT);
@@ -127,17 +114,17 @@ void setup() {
 
   pinMode(LED_BUILTIN, OUTPUT);
 
-  // Ensure motors start OFF
+  // 2. Start with motors completely off
   stopMotors();
 
-  // Enable Driver Chips (BTS7960 Enable Pins HIGH)
+  // 3. Drive Enable Pins HIGH (Powers the H-Bridge output stage)
   enableDrivers(true);
-  Serial.println(F("[DRIVERS] Motor enable pins pulled HIGH."));
+  Serial.println(F("[PINS] Left Enable (Pin 4) & Right Enable (Pin 8) = HIGH"));
 
-  // 3-second safety countdown before starting
-  Serial.println(F("[SAFETY] Starting in 3 seconds... Stand clear!"));
+  // 4. 3-second safety countdown
+  Serial.println(F("[SAFETY] Starting test in 3 seconds..."));
   for (int i = 3; i > 0; i--) {
-    Serial.print(F("  "));
+    Serial.print(F("  Countdown: "));
     Serial.println(i);
     digitalWrite(LED_BUILTIN, HIGH);
     delay(200);
@@ -145,15 +132,13 @@ void setup() {
     delay(800);
   }
 
-  // =========================================================================
-  // 5. RUN 5 CYCLES (2s FORWARD -> 1.5s STOP)
-  // =========================================================================
+  // 5. Execute 5 Cycles: 2s Forward -> 1.5s Stop
   for (int cycle = 1; cycle <= TOTAL_CYCLES; cycle++) {
     Serial.print(F("\n>>> [CYCLE "));
     Serial.print(cycle);
     Serial.print(F("/"));
     Serial.print(TOTAL_CYCLES);
-    Serial.println(F("] DRIVING STRAIGHT FORWARD (2 sec)..."));
+    Serial.println(F("] DRIVING FORWARD (2 seconds)..."));
 
     digitalWrite(LED_BUILTIN, HIGH);
     driveStraight(DRIVE_SPEED);
@@ -163,25 +148,25 @@ void setup() {
     Serial.print(cycle);
     Serial.print(F("/"));
     Serial.print(TOTAL_CYCLES);
-    Serial.println(F("] STOPPED (1.5 sec)..."));
+    Serial.println(F("] STOP (1.5 seconds)..."));
 
     stopMotors();
     digitalWrite(LED_BUILTIN, LOW);
     delay(PAUSE_MS);
   }
 
-  // Sequence Finished: Disable and cut all power
+  // 6. Test Finished: Safely cut enable pins and motor PWM
   enableDrivers(false);
   stopMotors();
 
-  Serial.println(F("\n========================================="));
-  Serial.println(F("  TEST COMPLETE: All 5 cycles finished!"));
-  Serial.println(F("  Drivers disabled. Motors safely stopped."));
-  Serial.println(F("=========================================\n"));
+  Serial.println(F("\n============================================="));
+  Serial.println(F("  SUCCESS: All 5 cycles completed!"));
+  Serial.println(F("  Motors safely disabled and shut down."));
+  Serial.println(F("=============================================\n"));
 }
 
 void loop() {
-  // Safety idle loop - do nothing once test sequence is done
+  // Idle: Keep motors completely off
   digitalWrite(LED_BUILTIN, LOW);
-  delay(500);
+  delay(1000);
 }
