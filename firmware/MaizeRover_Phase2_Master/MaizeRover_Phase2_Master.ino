@@ -84,8 +84,10 @@ WiFiSSLClient sslClient;
 // FIELD GEOMETRY & TUNING
 // =========================================================================
 #define NUM_LEDS           8
-const int   BASE_SPEED     = 190; 
-const int   TURN_SPEED     = 150; 
+const int   BASE_SPEED     = 200; 
+const int   TURN_SPEED     = 170; 
+const bool  LEFT_INVERT    = false;
+const bool  RIGHT_INVERT   = true;  // Opposing motor mounted on right chassis
 const float DROP_SPACING_M = 0.25;
 const float ROW_SPACING_M  = 0.75;
 const int   DROPS_PER_ROW  = 20;
@@ -274,6 +276,7 @@ void handleIncomingCommands() {
   // Execute Command
   if (action == "estop") {
     currentMode = MODE_ESTOP;
+    enableDrivers(false);
     stopMotors();
     digitalWrite(PUMP_RELAY_PIN, HIGH);
     tone(BUZZER_PIN, 1200, 500);
@@ -281,6 +284,7 @@ void handleIncomingCommands() {
   }
   else if (action == "clear_estop") {
     currentMode = MODE_MANUAL;
+    enableDrivers(true);
     stopMotors();
     noTone(BUZZER_PIN);
     Serial.println("[ESTOP] Cleared to MANUAL mode.");
@@ -343,39 +347,55 @@ void handleIncomingCommands() {
 // =========================================================================
 // MOTOR DRIVE FUNCTIONS
 // =========================================================================
+void enableDrivers(bool enable) {
+  uint8_t state = enable ? HIGH : LOW;
+  digitalWrite(MOTOR_LEFT_EN, state);
+  digitalWrite(MOTOR_RIGHT_EN, state);
+}
+
+void driveSide(uint8_t rpwmPin, uint8_t lpwmPin, int speed, bool invert) {
+  if (invert) speed = -speed;
+  speed = constrain(speed, -255, 255);
+
+  if (speed > 0) {
+    analogWrite(lpwmPin, 0);
+    analogWrite(rpwmPin, speed);
+  } else if (speed < 0) {
+    analogWrite(rpwmPin, 0);
+    analogWrite(lpwmPin, -speed);
+  } else {
+    analogWrite(rpwmPin, 0);
+    analogWrite(lpwmPin, 0);
+  }
+}
+
 void driveForward() {
-  analogWrite(MOTOR_LEFT_RPWM, BASE_SPEED);
-  analogWrite(MOTOR_LEFT_LPWM, 0);
-  analogWrite(MOTOR_RIGHT_RPWM, BASE_SPEED);
-  analogWrite(MOTOR_RIGHT_LPWM, 0);
+  enableDrivers(true);
+  driveSide(MOTOR_LEFT_RPWM, MOTOR_LEFT_LPWM, BASE_SPEED, LEFT_INVERT);
+  driveSide(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, BASE_SPEED, RIGHT_INVERT);
 }
 
 void driveReverse() {
-  analogWrite(MOTOR_LEFT_RPWM, 0);
-  analogWrite(MOTOR_LEFT_LPWM, BASE_SPEED);
-  analogWrite(MOTOR_RIGHT_RPWM, 0);
-  analogWrite(MOTOR_RIGHT_LPWM, BASE_SPEED);
+  enableDrivers(true);
+  driveSide(MOTOR_LEFT_RPWM, MOTOR_LEFT_LPWM, -BASE_SPEED, LEFT_INVERT);
+  driveSide(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, -BASE_SPEED, RIGHT_INVERT);
 }
 
 void pivotLeft() {
-  analogWrite(MOTOR_LEFT_RPWM, 0);
-  analogWrite(MOTOR_LEFT_LPWM, TURN_SPEED);
-  analogWrite(MOTOR_RIGHT_RPWM, TURN_SPEED);
-  analogWrite(MOTOR_RIGHT_LPWM, 0);
+  enableDrivers(true);
+  driveSide(MOTOR_LEFT_RPWM, MOTOR_LEFT_LPWM, -TURN_SPEED, LEFT_INVERT);
+  driveSide(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, TURN_SPEED, RIGHT_INVERT);
 }
 
 void pivotRight() {
-  analogWrite(MOTOR_LEFT_RPWM, TURN_SPEED);
-  analogWrite(MOTOR_LEFT_LPWM, 0);
-  analogWrite(MOTOR_RIGHT_RPWM, 0);
-  analogWrite(MOTOR_RIGHT_LPWM, TURN_SPEED);
+  enableDrivers(true);
+  driveSide(MOTOR_LEFT_RPWM, MOTOR_LEFT_LPWM, TURN_SPEED, LEFT_INVERT);
+  driveSide(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, -TURN_SPEED, RIGHT_INVERT);
 }
 
 void stopMotors() {
-  analogWrite(MOTOR_LEFT_RPWM, 0);
-  analogWrite(MOTOR_LEFT_LPWM, 0);
-  analogWrite(MOTOR_RIGHT_RPWM, 0);
-  analogWrite(MOTOR_RIGHT_LPWM, 0);
+  driveSide(MOTOR_LEFT_RPWM, MOTOR_LEFT_LPWM, 0, false);
+  driveSide(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, 0, false);
 }
 
 void actuateSeedDrop() {
