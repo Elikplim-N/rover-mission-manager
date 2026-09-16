@@ -18,6 +18,12 @@
                                                   [ESTOP] (reachable from any state)
 
   Features:
+  - Autonomous boustrophedon driving between planting points: compass-heading
+    PID (P) with accumulated error (I) and gyro-rate damping (D) holds a
+    straight line, and gyro-tracked pivots execute the row-to-row U-turns.
+    Interruptible by E-Stop, pause, and obstacle detection at every control
+    tick, not just between drops. Kp/Ki/Kd/max-correction are runtime-tunable
+    via /cmd?action=config so field tuning never needs a reflash.
   - Local mission configuration and lifecycle control over the port-8080 command
     server: config, start_mission, pause_mission, resume_mission, status
   - Status endpoint returns the latest telemetry snapshot and mission progress so a
@@ -108,6 +114,23 @@ int         TOTAL_ROWS     = 10;
 int         MOIST_THRESHOLD= 450;
 const unsigned long DRIVE_DEADMAN_TIMEOUT = 600; // Auto-stop motors after 600ms of silence
 
+// Closed-loop straight-line driving: compass heading (P) + gyro Z rate (D) +
+// accumulated heading error (I), runtime-configurable via /cmd?action=config
+// so gains can be tuned in the field without reflashing.
+float       Kp             = 2.4;
+float       Ki             = 0.03;
+float       Kd             = 0.65;
+int         MAX_CORRECTION = 55;
+
+// Time-based distance estimate (no wheel encoders): milliseconds of
+// BASE_SPEED driving to cover one meter, calibrated empirically on the bench.
+// Re-measure if BASE_SPEED, wheels, gearing, or battery voltage change --
+// these two are independently tuned because the row-gap crossing includes
+// the U-turn's own settling and isn't simply proportional to the per-drop one.
+const float MS_PER_METER_DROP    = 8000.0;
+const float MS_PER_METER_ROW_GAP = 4000.0;
+const float PIVOT_ANGLE_DEG      = 90.0; // Row-to-row U-turn is two of these
+
 // Mission lifecycle state
 bool missionActive     = false; // true once start_mission has been called
 bool missionComplete   = false; // true once TOTAL_ROWS has been fully covered
@@ -127,6 +150,12 @@ unsigned long lastDropTime = 0;
 unsigned long lastDriveCommandTime = 0;
 bool isArmDeployed = false;
 bool bmeReady = false; // false if the BME280 never ACKed at either I2C address
+
+// Closed-loop navigation state
+float gyroZOffset   = 0.0;  // Measured at boot; subtract from raw gyro Z to get real rate
+float pidIntegral   = 0.0;  // Accumulated heading error, reset at the start of each drive segment
+float lockedHeading = 0.0;  // Current navigation target: the compass heading to hold
+float lastGoodHeading = 0.0; // Last successful compass read, held through transient I2C hiccups
 
 // Latest telemetry snapshot, exposed via /cmd?action=status so a companion app on
 // the local network can poll it and log each drop on-device without any cloud
@@ -177,11 +206,29 @@ void setup() {
   setRGBColor(strip.Color(255, 120, 0)); // Amber: Booting
   strip.show();
 
-  // Wake up MPU-6050
+  // Wake up MPU-6050 and configure it for stable gyro readings
   Wire.beginTransmission(MPU6050_ADDR);
   Wire.write(0x6B);
   Wire.write(0);
   Wire.endTransmission(true);
+  Wire.beginTransmission(MPU6050_ADDR); Wire.write(0x1A); Wire.write(0x03); Wire.endTransmission(); // 44Hz digital low-pass filter
+  Wire.beginTransmission(MPU6050_ADDR); Wire.write(0x1B); Wire.write(0x00); Wire.endTransmission(); // +/-250 deg/s full scale
+
+  // Compass continuous-measurement mode (needed for reliable heading-hold
+  // driving; the telemetry-only heading read worked without this, but PID
+  // steering needs a properly configured sensor, not just its power-on defaults)
+  initCompass();
+
+  // Gyro Z-axis calibration: average the drift while stationary so
+  // readGyroZRate() can report true angular velocity, not sensor bias.
+  Serial.println(F("[NAV] Calibrating gyro, keep the rover still..."));
+  float gyroSum = 0.0;
+  for (int i = 0; i < 200; i++) {
+    gyroSum += readRawGyroZ();
+    delay(5);
+  }
+  gyroZOffset = gyroSum / 200.0;
+  Serial.println(F("[NAV] Gyro calibrated."));
 
   // BME280 Init & Barometric Altitude Tare
   bmeReady = bme.begin(0x76);
@@ -403,10 +450,15 @@ void handleIncomingCommands() {
     v = getParam(req, "moist");    if (v.length()) MOIST_THRESHOLD = v.toInt();
     v = getParam(req, "speed");    if (v.length()) BASE_SPEED = v.toInt();
     v = getParam(req, "turn");     if (v.length()) TURN_SPEED = v.toInt();
+    v = getParam(req, "kp");       if (v.length()) Kp = v.toFloat();
+    v = getParam(req, "ki");       if (v.length()) Ki = v.toFloat();
+    v = getParam(req, "kd");       if (v.length()) Kd = v.toFloat();
+    v = getParam(req, "maxCorr");  if (v.length()) MAX_CORRECTION = v.toInt();
     Serial.println("[CONFIG] rows=" + String(TOTAL_ROWS) + " drops=" + String(DROPS_PER_ROW) +
                     " dropDist=" + String(DROP_SPACING_M) + " rowGap=" + String(ROW_SPACING_M) +
                     " moist=" + String(MOIST_THRESHOLD) + " speed=" + String(BASE_SPEED) +
-                    " turn=" + String(TURN_SPEED));
+                    " turn=" + String(TURN_SPEED) + " kp=" + String(Kp) + " ki=" + String(Ki) +
+                    " kd=" + String(Kd) + " maxCorr=" + String(MAX_CORRECTION));
   }
   else if (action == "start_mission" && currentMode != MODE_ESTOP) {
     currentRow = 1;
@@ -415,7 +467,11 @@ void handleIncomingCommands() {
     missionComplete = false;
     lastDropTime = millis();
     currentMode = MODE_AUTO;
-    Serial.println("[MISSION] Started.");
+    // Lock the heading the rover happens to be facing right now as the row 1
+    // navigation target, and clear PID state for a clean start.
+    lockedHeading = readCompassHeading();
+    pidIntegral = 0.0;
+    Serial.println("[MISSION] Started. Baseline heading locked: " + String(lockedHeading, 1));
   }
   else if (action == "pause_mission") {
     if (currentMode == MODE_AUTO) {
@@ -538,6 +594,110 @@ void stopMotors() {
   driveSide(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, 0, false);
 }
 
+// =========================================================================
+// AUTONOMOUS DRIVE ORCHESTRATION (bench-proven compass+gyro PID loop)
+// =========================================================================
+// These block for multiple seconds at a time (there are no wheel encoders,
+// so distance is time-based), so each one polls handleIncomingCommands(),
+// the obstacle sensor, and currentMode on every iteration -- an E-Stop,
+// pause, or obstacle mid-drive takes effect immediately instead of only
+// being checked between drops. Returning false means "did not complete";
+// callers must not advance currentRow/currentDrop or treat the segment as
+// having actually happened.
+
+// Drives straight for durationMs using compass-heading (P), accumulated
+// error (I), and gyro-rate damping (D) to hold lockedHeading.
+bool driveStraightPID(unsigned long durationMs) {
+  pidIntegral = 0.0;
+  enableDrivers(true);
+  unsigned long start = millis();
+  unsigned long lastPoll = start;
+
+  while (millis() - start < durationMs) {
+    handleIncomingCommands();
+    if (currentMode != MODE_AUTO) {
+      stopMotors();
+      return false;
+    }
+
+    float obsDist = readUltrasonicCM();
+    if (obsDist > 0 && obsDist < 20.0) {
+      stopMotors();
+      setRGBColor(strip.Color(255, 0, 0));
+      tone(BUZZER_PIN, 900, 60);
+      return false;
+    }
+
+    if (millis() - lastPoll >= 20) { // 50Hz control loop, matches the bench-tuned gains
+      float dt = (millis() - lastPoll) / 1000.0;
+      lastPoll = millis();
+
+      float currentHeading = readCompassHeading();
+      float error = headingError(currentHeading, lockedHeading);
+      float P = Kp * error;
+
+      pidIntegral = constrain(pidIntegral + error * dt, -20.0, 20.0);
+      float I = Ki * pidIntegral;
+
+      float D = -Kd * readGyroZRate();
+
+      int correction = constrain((int)(P + I + D), -MAX_CORRECTION, MAX_CORRECTION);
+      driveSide(MOTOR_LEFT_RPWM, MOTOR_LEFT_LPWM, BASE_SPEED + correction, LEFT_INVERT);
+      driveSide(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, BASE_SPEED - correction, RIGHT_INVERT);
+    }
+  }
+  stopMotors();
+  return true;
+}
+
+// Pivots in place until the gyro reports ~targetDegrees of rotation.
+// Autonomous-only: manual teleop's pivotLeft()/pivotRight() stay
+// duration-based (deadman timeout) and are untouched by this.
+bool pivotByGyroAngle(bool turnRight, float targetDegrees) {
+  float turnedAngle = 0.0;
+  unsigned long lastT = micros();
+
+  if (turnRight) pivotRight(); else pivotLeft();
+
+  while (fabs(turnedAngle) < (targetDegrees - 1.5)) {
+    handleIncomingCommands();
+    if (currentMode != MODE_AUTO) {
+      stopMotors();
+      return false;
+    }
+    unsigned long now = micros();
+    float dt = (now - lastT) / 1000000.0;
+    lastT = now;
+    turnedAngle += readGyroZRate() * dt;
+    delayMicroseconds(5000);
+  }
+  stopMotors();
+  return true;
+}
+
+// Row-to-row transition: pivot ~90 deg, cross the row gap, pivot ~90 deg
+// again, ending up facing down the new row. Re-locks the navigation
+// heading from a fresh compass read after each pivot rather than assuming
+// a fixed cardinal target, since that's what was actually bench-validated.
+bool performRowTransition(bool turnRight) {
+  stopMotors();
+  delay(300);
+
+  if (!pivotByGyroAngle(turnRight, PIVOT_ANGLE_DEG)) return false;
+  delay(300); // let the chassis/compass settle before trusting a new reading
+
+  lockedHeading = readCompassHeading();
+  pidIntegral = 0.0;
+  if (!driveStraightPID((unsigned long)(ROW_SPACING_M * MS_PER_METER_ROW_GAP))) return false;
+
+  if (!pivotByGyroAngle(turnRight, PIVOT_ANGLE_DEG)) return false;
+  delay(300);
+
+  lockedHeading = readCompassHeading();
+  pidIntegral = 0.0;
+  return true;
+}
+
 void actuateSeedDrop() {
   seedServo.write(60);
   delay(180);
@@ -548,11 +708,30 @@ void actuateSeedDrop() {
 // PLANTING & LOCAL TELEMETRY PIPELINE
 // =========================================================================
 void executePlantingDrop() {
-  currentDrop++;
-  if (currentDrop > DROPS_PER_ROW) {
-    currentDrop = 1;
-    currentRow++;
+  // Work out where this drop lands without committing to it yet: if the
+  // physical drive gets interrupted (E-Stop, pause, or an obstacle) partway
+  // there, currentRow/currentDrop must stay at their previous values so
+  // resume_mission retries this exact drop instead of skipping it.
+  int targetDrop = currentDrop + 1;
+  int targetRow = currentRow;
+  bool newRow = false;
+  if (targetDrop > DROPS_PER_ROW) {
+    targetDrop = 1;
+    targetRow = currentRow + 1;
+    newRow = true;
   }
+
+  if (newRow) {
+    // Alternates with the row just finished, tracing a serpentine U-turn
+    // that matches the boustrophedon direction already used for synX below.
+    bool turnRight = (currentRow % 2 != 0);
+    if (!performRowTransition(turnRight)) return; // interrupted; try again next tick
+  }
+  if (!driveStraightPID((unsigned long)(DROP_SPACING_M * MS_PER_METER_DROP))) return;
+
+  // Physically arrived: now it's safe to commit the new position.
+  currentDrop = targetDrop;
+  currentRow = targetRow;
 
   float synX = (currentRow % 2 != 0)
     ? (currentDrop - 1) * DROP_SPACING_M
@@ -588,10 +767,7 @@ void executePlantingDrop() {
   readMPU6050(pitch, roll);
 
   float absHead = readCompassHeading();
-  float targetHead = (currentRow % 2 != 0) ? 90.0 : 270.0;
-  float err = absHead - targetHead;
-  if (err > 180.0) err -= 360.0;
-  if (err < -180.0) err += 360.0;
+  float err = headingError(absHead, lockedHeading); // live PID tracking error, not an assumed cardinal target
 
   float lat = gps.location.isValid() ? gps.location.lat() : 0.0;
   float lng = gps.location.isValid() ? gps.location.lng() : 0.0;
@@ -712,9 +888,52 @@ float readCompassHeading() {
 
     float heading = atan2(y, x) * 180.0 / M_PI;
     if (heading < 0) heading += 360.0;
+    lastGoodHeading = heading;
     return heading;
   }
-  return 0.0;
+  // A transient I2C hiccup mid-drive shouldn't snap the PID error to a fake
+  // 0 deg reading and yank the steering; hold the last real measurement
+  // instead until a fresh one comes in.
+  return lastGoodHeading;
+}
+
+// One-time HMC5883L/QMC5883L configuration for reliable continuous-mode
+// reads. The telemetry-only heading read got away with the sensor's
+// power-on defaults; closed-loop steering needs it properly configured.
+void initCompass() {
+  Wire.beginTransmission(COMPASS_ADDR); Wire.write(0x00); Wire.write(0x70); Wire.endTransmission();
+  Wire.beginTransmission(COMPASS_ADDR); Wire.write(0x01); Wire.write(0x20); Wire.endTransmission();
+  Wire.beginTransmission(COMPASS_ADDR); Wire.write(0x02); Wire.write(0x00); Wire.endTransmission();
+}
+
+// MPU-6050 gyro Z-axis (yaw rate), used both to damp the straight-line PID
+// loop and to track how far a U-turn has actually rotated.
+float readRawGyroZ() {
+  Wire.beginTransmission(MPU6050_ADDR);
+  Wire.write(0x47);
+  if (Wire.endTransmission(false) != 0) return gyroZOffset;
+
+  Wire.requestFrom((uint8_t)MPU6050_ADDR, (uint8_t)2);
+  if (Wire.available() >= 2) {
+    int16_t rawZ = Wire.read() << 8 | Wire.read();
+    return (float)rawZ / 131.0; // +/-250 deg/s full-scale sensitivity
+  }
+  return gyroZOffset;
+}
+
+float readGyroZRate() {
+  float rate = readRawGyroZ() - gyroZOffset;
+  if (fabs(rate) < 0.20) rate = 0.0; // Deadband: ignore stationary sensor noise
+  return rate;
+}
+
+// Signed heading error in [-180, 180]: currentHeading minus targetHeading,
+// wrapped the short way around the compass. Matches the exact sign
+// convention of the bench-proven PID loop this was ported from -- the
+// correction math below (left = BASE+correction, right = BASE-correction)
+// is calibrated against this specific sign, not an independently-derived one.
+float headingError(float currentHeading, float targetHeading) {
+  return fmod((currentHeading - targetHeading + 540.0), 360.0) - 180.0;
 }
 
 void setRGBColor(uint32_t color) {

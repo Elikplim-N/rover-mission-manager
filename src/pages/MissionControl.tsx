@@ -37,6 +37,10 @@ interface MissionParams {
   moist: number;
   speed: number;
   turn: number;
+  kp: number;
+  ki: number;
+  kd: number;
+  maxCorr: number;
 }
 
 const DEFAULT_PARAMS: MissionParams = {
@@ -46,7 +50,13 @@ const DEFAULT_PARAMS: MissionParams = {
   rowGap: 0.75,
   moist: 450,
   speed: 190,
-  turn: 150
+  turn: 150,
+  // Bench-proven starting point for the compass+gyro steering PID loop;
+  // tune these against your own rover's actual drift, not blind.
+  kp: 2.4,
+  ki: 0.03,
+  kd: 0.65,
+  maxCorr: 55
 };
 
 export default function MissionControl() {
@@ -56,6 +66,7 @@ export default function MissionControl() {
   const [error, setError] = useState<string | null>(null);
   const [params, setParams] = useState<MissionParams>(DEFAULT_PARAMS);
   const [configApplied, setConfigApplied] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [dispatching, setDispatching] = useState(false);
   const [savedRunId, setSavedRunId] = useState<string | null>(null);
   const [loggedPoints, setLoggedPoints] = useState(0);
@@ -213,7 +224,11 @@ export default function MissionControl() {
       rowGap: params.rowGap,
       moist: params.moist,
       speed: params.speed,
-      turn: params.turn
+      turn: params.turn,
+      kp: params.kp,
+      ki: params.ki,
+      kd: params.kd,
+      maxCorr: params.maxCorr
     });
     setDispatching(false);
     if (res.ok) {
@@ -344,6 +359,29 @@ export default function MissionControl() {
               <NumField label="Drive Speed" value={params.speed} onChange={(v) => setParams(p => ({ ...p, speed: v }))} />
               <NumField label="Turn Speed" value={params.turn} onChange={(v) => setParams(p => ({ ...p, turn: v }))} />
             </div>
+
+            <button
+              type="button"
+              onClick={() => setShowAdvanced(s => !s)}
+              className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              {showAdvanced ? 'Hide' : 'Show'} steering PID tuning
+            </button>
+
+            {showAdvanced && (
+              <div className="bg-gray-50 dark:bg-gray-900/40 border border-gray-200 dark:border-gray-700 rounded-xl p-4 space-y-3">
+                <p className="text-[11px] text-gray-500 dark:text-gray-400">
+                  Compass-heading PID gains for holding a straight line between drops. Start from the bench-proven
+                  defaults and adjust based on how the rover actually drifts on your ground.
+                </p>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <NumField label="Kp (heading)" step={0.1} value={params.kp} onChange={(v) => setParams(p => ({ ...p, kp: v }))} />
+                  <NumField label="Ki (bias)" step={0.01} value={params.ki} onChange={(v) => setParams(p => ({ ...p, ki: v }))} />
+                  <NumField label="Kd (gyro damping)" step={0.05} value={params.kd} onChange={(v) => setParams(p => ({ ...p, kd: v }))} />
+                  <NumField label="Max Correction" value={params.maxCorr} onChange={(v) => setParams(p => ({ ...p, maxCorr: v }))} />
+                </div>
+              </div>
+            )}
 
             <button
               onClick={applyConfig}
