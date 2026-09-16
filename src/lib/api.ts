@@ -133,6 +133,25 @@ export async function pushMissionToCloud(mission: MissionRun): Promise<{ ok: boo
 // TELEOPERATION & REMOTE E-STOP CLIENT API
 // =========================================================================
 
+// The rover's WiFiServer on port 8080 is a single-threaded, single-client-
+// at-a-time Arduino HTTP server. Mission Control polls it for status every
+// 1.5s in the background while the operator can also dispatch a command
+// (including the auto-start countdown) at any moment, including mid-poll.
+// Two overlapping requests hitting that tiny server back-to-back is a
+// plausible way to get a garbled/interleaved response on one of them, so
+// every request to the rover is funneled through this queue to guarantee
+// only one is ever in flight at a time.
+let roverRequestQueue: Promise<unknown> = Promise.resolve();
+
+function queueRoverRequest<T>(run: () => Promise<T>): Promise<T> {
+  const result = roverRequestQueue.then(run, run);
+  roverRequestQueue = result.then(
+    () => undefined,
+    () => undefined
+  );
+  return result;
+}
+
 export type RoverAction =
   | 'estop'
   | 'clear_estop'
@@ -188,29 +207,32 @@ export async function sendRoverCommand(action: RoverAction, params: Record<strin
   // at all now). Falling back to the cloud here would either fail confusingly
   // or, worse, report a false "success" that never reaches the physical
   // rover, so this only ever talks to the rover directly.
-  if (!config.directRoverIp) {
+  const roverIp = config.directRoverIp;
+  if (!roverIp) {
     return { ok: false, error: "No rover IP configured. Connect this device to the rover's own WiFi network first." };
   }
 
-  try {
-    const cleanIp = config.directRoverIp.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-    const query = new URLSearchParams({ action, ...Object.fromEntries(
-      Object.entries(params).map(([k, v]) => [k, String(v)])
-    ) }).toString();
-    const directUrl = `http://${cleanIp}:8080/cmd?${query}`;
-    const res = await fetch(directUrl, {
-      method: 'GET',
-      signal: AbortSignal.timeout(1200)
-    });
-    if (!res.ok) {
-      return { ok: false, error: `Rover returned HTTP ${res.status}` };
+  return queueRoverRequest(async () => {
+    try {
+      const cleanIp = roverIp.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+      const query = new URLSearchParams({ action, ...Object.fromEntries(
+        Object.entries(params).map(([k, v]) => [k, String(v)])
+      ) }).toString();
+      const directUrl = `http://${cleanIp}:8080/cmd?${query}`;
+      const res = await fetch(directUrl, {
+        method: 'GET',
+        signal: AbortSignal.timeout(1200)
+      });
+      if (!res.ok) {
+        return { ok: false, error: `Rover returned HTTP ${res.status}` };
+      }
+      const data = await res.json();
+      return { ok: true, mode: data.mode, source: 'direct' };
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: `Could not reach the rover at ${roverIp}: ${errorMsg}` };
     }
-    const data = await res.json();
-    return { ok: true, mode: data.mode, source: 'direct' };
-  } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `Could not reach the rover at ${config.directRoverIp}: ${errorMsg}` };
-  }
+  });
 }
 
 // Polls the rover directly over the LAN for its full mission/telemetry
@@ -218,25 +240,28 @@ export async function sendRoverCommand(action: RoverAction, params: Record<strin
 // on-device logging must keep working with no internet connection at all.
 export async function fetchRoverStatus(): Promise<{ ok: boolean; status?: RoverStatus; error?: string }> {
   const config = getDokployConfig();
-  if (!config.directRoverIp) {
+  const roverIp = config.directRoverIp;
+  if (!roverIp) {
     return { ok: false, error: 'No direct rover IP configured.' };
   }
 
-  try {
-    const cleanIp = config.directRoverIp.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-    const res = await fetch(`http://${cleanIp}:8080/cmd?action=status`, {
-      method: 'GET',
-      signal: AbortSignal.timeout(1500)
-    });
-    if (!res.ok) {
-      return { ok: false, error: `HTTP ${res.status}: ${res.statusText}` };
+  return queueRoverRequest(async () => {
+    try {
+      const cleanIp = roverIp.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+      const res = await fetch(`http://${cleanIp}:8080/cmd?action=status`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(1500)
+      });
+      if (!res.ok) {
+        return { ok: false, error: `HTTP ${res.status}: ${res.statusText}` };
+      }
+      const data: RoverStatus = await res.json();
+      return { ok: true, status: data };
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: errorMsg };
     }
-    const data: RoverStatus = await res.json();
-    return { ok: true, status: data };
-  } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: errorMsg };
-  }
+  });
 }
 
 export async function fetchRoverCommandState(): Promise<{
