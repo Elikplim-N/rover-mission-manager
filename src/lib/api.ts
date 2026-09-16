@@ -188,6 +188,10 @@ export interface RoverStatus {
   moist: number; watered: boolean;
   absHead: number; err: number; pitch: number; roll: number;
   lat: number; lng: number; sats: number; obsDist: number;
+  // Peak Z-axis shock (deviation from 1g) measured by the second MPU-6050
+  // (0x69) during the most recent drive segment. Optional so older firmware
+  // that doesn't report it yet doesn't break status parsing.
+  roughness?: number;
 }
 
 export interface CommandResponse {

@@ -9,7 +9,7 @@ import {
   CheckCircle2,
   Settings2,
   Battery,
-  Thermometer,
+  Activity,
   Satellite,
   Gauge,
   FolderOpen,
@@ -49,14 +49,14 @@ const DEFAULT_PARAMS: MissionParams = {
   dropDist: 0.25,
   rowGap: 0.75,
   moist: 450,
-  speed: 190,
-  turn: 150,
-  // Bench-proven starting point for the compass+gyro steering PID loop;
-  // tune these against your own rover's actual drift, not blind.
-  kp: 2.4,
-  ki: 0.03,
-  kd: 0.65,
-  maxCorr: 55
+  speed: 100,
+  turn: 100,
+  // Bench-proven starting point for the dual-MPU local-yaw-hold steering PID
+  // loop (no compass); tune these against your own rover's actual drift, not blind.
+  kp: 3.5,
+  ki: 0.05,
+  kd: 1.0,
+  maxCorr: 30
 };
 
 export default function MissionControl() {
@@ -338,7 +338,7 @@ export default function MissionControl() {
           {/* Live Telemetry Strip */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <StatTile icon={Battery} label="Battery" value={`${status.volt.toFixed(1)} V`} />
-            <StatTile icon={Thermometer} label="Temp" value={`${status.tempC.toFixed(1)} C`} />
+            <StatTile icon={Activity} label="Roughness" value={(status.roughness ?? 0).toFixed(2)} />
             <StatTile icon={Gauge} label="Soil Moisture" value={String(status.moist)} />
             <StatTile icon={Satellite} label="GPS Sats" value={String(status.sats)} />
           </div>
