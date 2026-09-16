@@ -408,27 +408,6 @@ export default function Teleop() {
                 <span className="text-xs font-medium text-blue-600 group-hover:underline">Pulse</span>
               </button>
 
-              {/* Articulated Arm */}
-              <button
-                onClick={() => handleCommand('test_arm')}
-                disabled={roverMode === 'ESTOP' || dispatching}
-                className="flex items-center justify-between p-3.5 rounded-xl border border-gray-200 dark:border-gray-700 hover:border-indigo-500 dark:hover:border-indigo-500 bg-gray-50 dark:bg-gray-750 transition-colors group text-left disabled:opacity-40"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-lg bg-indigo-100 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
-                    <Wrench className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="text-xs font-semibold text-gray-900 dark:text-white">
-                      Toggle Tool Arm (Servo D12)
-                    </div>
-                    <div className="text-[11px] text-gray-500 dark:text-gray-400">
-                      Alternates arm between transit (90°) and furrow soil depth (0°)
-                    </div>
-                  </div>
-                </div>
-                <span className="text-xs font-medium text-indigo-600 group-hover:underline">Toggle</span>
-              </button>
             </div>
           </div>
 
