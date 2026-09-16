@@ -21,7 +21,7 @@ The system consists of three primary architectural tiers:
 ```mermaid
 flowchart TB
     subgraph EdgeTier["Edge Tier: Maize Rover (Arduino Uno R4 WiFi)"]
-        Sensors["Sensors: BME280, MPU-6050, Compass, GPS, Moisture, Ultrasonic"]
+        Sensors["Sensors: Dual MPU-6050 (0x68 Steering Gyro, 0x69 Roughness Accel), GPS, Moisture, Ultrasonic"]
         Actuators["Actuators: Drive Motors, Seed Servo, Arm Servo, Water Pump"]
         MCU["Renesas RA4M1 MCU + ESP32-S3 Wi-Fi Coprocessor\n(Hosts Access Point: 192.168.4.1)"]
         Sensors --> MCU
@@ -76,10 +76,18 @@ flowchart TB
 
 ```
 Arduino Uno R4 Pinout
-├── I2C Bus (Pins A4/SDA, A5/SCL)
-│   ├── Bosch BME280 (0x76/0x77): Ambient Temp, Humidity, Pressure, Barometric Altitude
-│   ├── MPU-6050 6-DoF IMU (0x68): Pitch & Roll inclination angles
-│   └── HMC5883L / QMC5883L (0x1E / 0x0D): Absolute compass heading
+├── I2C Bus (Pins A4/SDA, A5/SCL, shared by both boards below)
+│   ├── MPU-6050 #1 "Steering" (0x68, AD0=GND): Gyro Z-rate for closed-loop
+│   │   local relative-yaw-hold PID + turn tracking; accelerometer XY/Z also
+│   │   read for Pitch & Roll inclination angles
+│   └── MPU-6050 #2 "Roughness" (0x69, AD0=VCC): Z-axis accelerometer only,
+│       peak deviation from 1g sampled at 200Hz as a terrain-shock metric
+│
+│   NOTE: The BME280 (temp/humidity/pressure/altitude) and the HMC5883L /
+│   QMC5883L magnetometer from earlier hardware revisions have been removed.
+│   The magnetometer proved too electromagnetically noisy this close to the
+│   brushed-DC drive motors to hold a reliable heading; the second MPU-6050
+│   above replaces it with gyro-integrated relative yaw instead.
 ├── Analog Inputs
 │   ├── A0: Soil Moisture Probe (0 - 1023 ADC raw resistance/capacitance)
 │   ├── A1: Battery Voltage Divider (B25 module, 5:1 divider, 0-25V range)
@@ -104,18 +112,22 @@ Arduino Uno R4 Pinout
 
 ### 2.3 Sensor Processing & Mathematical Transformations
 
-1. **Relative Terrain Elevation (`Elev`)**:
-   - Barometric pressure fluctuates by weather. An absolute altitude calculation shifts across hours.
-   - **Solution**: The firmware executes a **tare calibration** during `setup()` by averaging 10 readings of `bme.readAltitude(1013.25)`.
-   - Telemetry computes relative elevation as:
-     $$\Delta \text{Elev} = \text{Altitude}_{\text{current}} - \text{Altitude}_{\text{baseline}}$$
+1. **Terrain Roughness (`Roughness`)**:
+   - MPU-6050 #2 (0x69) is read at 200Hz throughout every straight-line drive segment. Each sample computes deviation of the Z-axis accelerometer from stationary 1g:
+     $$\text{Shock} = \left| a_{z} - 1.0g \right|$$
+   - The telemetry value reported is the **running peak**, not an average, so one significant bump over rough ground is not smoothed away by an otherwise calm segment:
+     $$\text{Roughness} = \max(\text{Shock}_1, \text{Shock}_2, \dots, \text{Shock}_n) \text{ over the segment}$$
+   - This replaces the earlier BME280-based relative-elevation figure. This hardware revision has no barometric sensor, so `Elev`, `TempC`, `Hum`, and `Press` are always reported as `0.0` in every log — the columns are kept, not deleted, purely for CSV/JSON schema compatibility with existing tooling.
 2. **Synthetic Dead-Reckoning Grid (`SynX`, `SynY`)**:
    - In field environments where GNSS precision suffers from multipath error or tree canopy cover, the rover tracks row and drop indices using boustrophedon (serpentine) navigation:
      - For odd rows ($Row \pmod 2 \neq 0$): $\text{SynX} = (Drop - 1) \times S_{\text{drop}}$
      - For even rows ($Row \pmod 2 = 0$): $\text{SynX} = (N_{\text{drops}} - Drop) \times S_{\text{drop}}$
      - In both rows: $\text{SynY} = (Row - 1) \times S_{\text{row}}$
-3. **Course Error (`Err`)**:
-   - Deviation between target furrow heading ($\theta_{\text{target}} \in \{90^\circ, 270^\circ\}$) and absolute magnetometer heading ($\theta_{\text{abs}}$), normalized to $[-180^\circ, +180^\circ]$.
+3. **Local Relative-Yaw Steering Error (`Err`) & Digital-Compass Heading (`AbsHead`)**:
+   - There is no absolute heading reference on this hardware revision (no magnetometer). Every call to the straight-line PID resets a **local yaw integral to 0°** and holds it there by integrating MPU-6050 #1's (0x68) gyro Z-rate at 50Hz:
+     $$\text{localYaw}(t) = \int_{t_0}^{t} \dot{\theta}_{z}\,dt, \quad \text{reset to } 0 \text{ at the start of each segment}$$
+   - `Err` is simply the live `localYaw` value at the most recent control tick — the PID's own tracking error, not a deviation from a compass bearing.
+   - `AbsHead` is a **separate**, best-effort estimate: `globalYaw`, the same gyro-rate integration accumulated continuously since boot and never reset. It is exposed for logging and 3D-twin orientation only, is expected to drift over a long mission since nothing ever corrects it, and must not be treated as a true compass azimuth.
 
 ### 2.4 Operational State Machine & Teleoperation Architecture
 
@@ -154,8 +166,7 @@ stateDiagram-v2
    - Preempts all states immediately. Forces motor PWM to 0, cuts pump power, activates continuous horn tone and flashing red NeoPixels.
    - Global E-Stop trigger accessible in header navigation bar across the entire companion app.
 4. **Local-First Command Channel**:
-   - **Rover's own Access Point (Port 8080)**: Direct HTTP GET commands (`http://192.168.4.1:8080/cmd?action=...`) with $<20\text{ ms}$ latency once the phone/laptop has joined the rover's WiFi network. This is the only channel the rover itself understands.
-   - **Cloud Relay (optional, app-side fallback)**: if the app also has a Dokploy/Vercel server URL configured and the direct link is unreachable, teleop commands fall back to `POST /api/command` on that server for convenience during bench testing off the rover's network; this has no bearing on mission operation in the field.
+   - **Rover's own Access Point (Port 8080)**: Direct HTTP GET commands (`http://192.168.4.1:8080/cmd?action=...`) with $<20\text{ ms}$ latency once the phone/laptop has joined the rover's WiFi network. This is the **only** channel the app uses. An earlier revision fell back to a cloud relay (`POST /api/command`) when the direct link failed; that fallback was removed because it could silently report a false "success" that never reached the physical rover. If `directRoverIp` isn't configured, or the direct request fails, the app now surfaces the error instead of retrying through the cloud.
 5. **Deadman Safety Timeout**:
    - In `MANUAL`, motors automatically stop if no directional command is received within **600ms**, preventing rover runaway on lost WiFi packets.
 
@@ -163,11 +174,13 @@ stateDiagram-v2
 
 ## 3. Telemetry Protocol Specification
 
-Every drop is recorded using the same exact 19-column schema everywhere it appears: the rover's local `/cmd?action=status` snapshot, its USB CSV mirror, the companion app's on-device Dexie log, and — if a mission is later pushed to the cloud — the PostgreSQL `telemetry_points` table:
+Every drop is recorded using the same exact 20-column schema everywhere it appears: the rover's local `/cmd?action=status` snapshot, its USB CSV mirror, and the companion app's on-device Dexie log:
 
 ```csv
-Row,Drop,SynX,SynY,Volt,TempC,Hum,Press,Elev,Moist,Watered,AbsHead,Err,Pitch,Roll,Lat,Lng,Sats,ObsDist
+Row,Drop,SynX,SynY,Volt,TempC,Hum,Press,Elev,Moist,Watered,AbsHead,Err,Pitch,Roll,Lat,Lng,Sats,ObsDist,Roughness
 ```
+
+`Roughness` is new in this hardware revision; the cloud `telemetry_points` schema (Section 4.2) does not yet have a matching column, so it is currently dropped, not persisted, if a mission is pushed to the cloud for analysis.
 
 ### 3.1 Field Dictionary
 
@@ -178,20 +191,21 @@ Row,Drop,SynX,SynY,Volt,TempC,Hum,Press,Elev,Moist,Watered,AbsHead,Err,Pitch,Rol
 | **SynX** | `synX` | Float | m | $0.00 \dots X_{\max}$ | Local orthogonal Cartesian X-coordinate |
 | **SynY** | `synY` | Float | m | $0.00 \dots Y_{\max}$ | Local orthogonal Cartesian Y-coordinate |
 | **Volt** | `volt` | Float | V | $0.00 \dots 14.80$ | Rover power bus battery voltage |
-| **TempC** | `tempC` | Float | °C | $-10.0 \dots 65.0$ | Ambient canopy temperature |
-| **Hum** | `hum` | Float | % | $0.0 \dots 100.0$ | Ambient relative humidity |
-| **Press** | `press` | Float | hPa | $800.0 \dots 1100.0$| Barometric atmospheric pressure |
-| **Elev** | `elev` | Float | m | $-50.0 \dots 50.0$ | Relative micro-topography ground elevation |
+| **TempC** | `tempC` | Float | °C | always `0.0` | **Removed.** BME280 not present on this hardware revision; field kept for schema compatibility |
+| **Hum** | `hum` | Float | % | always `0.0` | **Removed.** BME280 not present on this hardware revision; field kept for schema compatibility |
+| **Press** | `press` | Float | hPa | always `0.0` | **Removed.** BME280 not present on this hardware revision; field kept for schema compatibility |
+| **Elev** | `elev` | Float | m | always `0.0` | **Removed.** BME280 not present on this hardware revision; field kept for schema compatibility |
 | **Moist** | `moist` | Integer | raw | $0 \dots 1023$ | Volumetric soil moisture sensor reading |
 | **Watered**| `watered`| Boolean| flag | $0 \text{ or } 1$ | Whether localized irrigation dose was dispensed |
-| **AbsHead**| `absHead`| Float | deg | $0.0 \dots 359.9$ | True magnetic compass azimuth |
-| **Err** | `err` | Float | deg | $-180.0 \dots 180.0$| Heading error offset relative to furrow track |
-| **Pitch** | `pitch` | Float | deg | $-90.0 \dots 90.0$ | Longitudinal rover inclination (fore/aft slope) |
-| **Roll** | `roll` | Float | deg | $-90.0 \dots 90.0$ | Transverse rover inclination (port/starboard slope) |
+| **AbsHead**| `absHead`| Float | deg | unbounded, drifts | `globalYaw`: gyro-integrated estimate accumulated since boot (MPU-6050 0x68). **Not** a magnetic compass azimuth — no magnetometer on this hardware revision |
+| **Err** | `err` | Float | deg | typically $-30 \dots 30$| Live local relative-yaw PID error (`localYaw`) for the current drive segment, reset to 0° at the start of each segment |
+| **Pitch** | `pitch` | Float | deg | $-90.0 \dots 90.0$ | Longitudinal rover inclination (fore/aft slope), from MPU-6050 #1 (0x68) accelerometer |
+| **Roll** | `roll` | Float | deg | $-90.0 \dots 90.0$ | Transverse rover inclination (port/starboard slope), from MPU-6050 #1 (0x68) accelerometer |
 | **Lat** | `lat` | Float | deg | $-90.0 \dots 90.0$ | WGS84 GPS Latitude |
 | **Lng** | `lng` | Float | deg | $-180.0 \dots 180.0$| WGS84 GPS Longitude |
 | **Sats** | `sats` | Integer | count| $0 \dots 32$ | Visible and locked GNSS satellite count |
 | **ObsDist**| `obsDist`| Float | cm | $0.0 \dots 999.0$ | Forward clearance to nearest obstacle |
+| **Roughness**| `roughness`| Float | g | $0.0 \dots \sim 2.0$| Peak Z-axis accelerometer deviation from 1g during the segment, from MPU-6050 #2 (0x69) sampled at 200Hz |
 
 ---
 
@@ -318,7 +332,7 @@ All of these are optional from the rover's perspective — they exist for the co
 
 ### 5.2 3D Terrain Reconstruction Engine (`Terrain3D.tsx`)
 1. **Grid Generation**: Calculates bounding box from $(\text{SynX}, \text{SynY})$ or translated GPS coordinates.
-2. **Elevation Warping**: Maps barometric relative elevation (`Elev`) to surface vertex heights using inverse-distance weighting (IDW) interpolation.
+2. **Elevation Warping**: Maps barometric relative elevation (`Elev`) to surface vertex heights using inverse-distance weighting (IDW) interpolation. **Currently flat**: `Elev` is always `0.0` on this hardware revision since the BME280 was removed; this engine has no elevation source until one is reinstated or a proxy (e.g. `Roughness`) is wired in instead.
 3. **Agronomic Heatmap**: Vertex shader interpolates between deep green (low elevation/furrow bottoms) to sandy yellow and reddish-brown (high terrain ridges).
 4. **Kinematic Playback**: Smooth spherical linear interpolation (`slerp`) of rover orientation, pitching and rolling according to real MPU-6050 telemetry data points.
 
@@ -333,15 +347,15 @@ sequenceDiagram
     participant A as Companion App (phone/laptop, offline)
     participant S as Cloud Backend (Vercel/Express + PostgreSQL)
 
-    Note over R: Boot: BME280 baseline tare calibration, host Access Point
+    Note over R: Boot: dual-MPU-6050 wake + gyro Z-offset calibration, host Access Point
     A->>R: Join rover's WiFi network
     A->>R: GET /cmd?action=config&... (optional grid/speed/moisture params)
     A->>R: GET /cmd?action=start_mission
     R-->>A: {"ok":true,"mode":"AUTO"}
 
     loop Every Planting Drop
-        R->>R: Read BME280, MPU-6050, Compass, GPS, Moisture
-        R->>R: Calculate synX, synY, relative elev
+        R->>R: Read dual MPU-6050 (0x68 steering gyro + 0x69 roughness accel), GPS, Moisture
+        R->>R: Calculate synX, synY, peak roughness for the segment
         R->>R: Actuate seed hopper servo & water pump
         R->>R: Output CSV line to USB CDC Serial (115200 Baud)
         R->>R: Update latest telemetry snapshot (telemetrySeq++)
@@ -381,7 +395,7 @@ Using the provided "Autonomous Maize Rover System: Architecture Knowledge Base",
 Follow these strict guidelines:
 1. Preserve the 19-column telemetry specification without omitting any column.
 2. Explain the hardware limitations of the Arduino Uno R4 (8KB Data Flash vs 32KB volatile SRAM) and justify why the rover hosts its own WiFi Access Point and logs nothing itself, leaving mission storage to the companion app.
-3. Detail the BME280 tare baseline calibration formula for relative micro-elevation.
+3. Detail the dual-MPU-6050 architecture: gyro-integrated local relative-yaw-hold PID steering (0x68, no magnetometer) and peak Z-axis shock terrain-roughness sensing (0x69, 200Hz).
 4. Provide the exact PostgreSQL relational schema for the optional cloud analysis backend, and be explicit that it is not on the rover's critical path.
 5. Emphasize the local-first IndexedDB (Dexie) design pattern: it is the authoritative mission log, not a cache, and the same app is used for logging in the field and analysis afterward.
 6. Maintain an academic, professional engineering tone with clean ASCII or Mermaid diagrams and no emojis.
