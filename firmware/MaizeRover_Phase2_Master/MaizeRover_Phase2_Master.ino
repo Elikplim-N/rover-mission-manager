@@ -126,6 +126,7 @@ float baselineAltitude = 0.0;
 unsigned long lastDropTime = 0;
 unsigned long lastDriveCommandTime = 0;
 bool isArmDeployed = false;
+bool bmeReady = false; // false if the BME280 never ACKed at either I2C address
 
 // Latest telemetry snapshot, exposed via /cmd?action=status so a companion app on
 // the local network can poll it and log each drop on-device without any cloud
@@ -183,7 +184,7 @@ void setup() {
   Wire.endTransmission(true);
 
   // BME280 Init & Barometric Altitude Tare
-  bool bmeReady = bme.begin(0x76);
+  bmeReady = bme.begin(0x76);
   if (!bmeReady) bmeReady = bme.begin(0x77);
 
   if (bmeReady) {
@@ -559,11 +560,19 @@ void executePlantingDrop() {
   float synY = (currentRow - 1) * ROW_SPACING_M;
 
   float obsDist = readUltrasonicCM();
-  float tempC = bme.readTemperature();
-  float hum   = bme.readHumidity();
-  float press = bme.readPressure() / 100.0F;
-  float currentAlt = bme.readAltitude(1013.25);
-  float elev = currentAlt - baselineAltitude;
+  // Guarded: an absent/disconnected BME280 makes these calls return NaN,
+  // which String() renders as the literal text "nan" -- not a valid JSON
+  // number -- corrupting every telemetry response until the sensor is
+  // connected. Report a clean 0 instead so the rest of the system (and the
+  // JSON it depends on) keeps working with the sensors that are present.
+  float tempC = 0.0f, hum = 0.0f, press = 0.0f, elev = 0.0f;
+  if (bmeReady) {
+    tempC = bme.readTemperature();
+    hum   = bme.readHumidity();
+    press = bme.readPressure() / 100.0F;
+    float currentAlt = bme.readAltitude(1013.25);
+    elev = currentAlt - baselineAltitude;
+  }
 
   int moist = analogRead(MOISTURE_PIN);
   bool watered = false;
@@ -622,11 +631,17 @@ void executePlantingDrop() {
   //    each drop on-device. This is the only telemetry sink the rover itself
   //    writes to; pushing a completed mission to the cloud for analysis is
   //    done afterward, from the app, whenever it has an internet connection.
+  //    Sanitized defensively: JSON has no NaN/Infinity literal, so any sensor
+  //    read that comes back non-finite (missing/disconnected hardware) would
+  //    otherwise corrupt this response and break every field in it, not just
+  //    the one bad reading.
   telemetrySeq++;
-  lastSynX = synX; lastSynY = synY; lastVolt = volt; lastTempC = tempC; lastHum = hum;
-  lastPress = press; lastElev = elev; lastMoist = moist; lastWatered = watered;
-  lastAbsHead = absHead; lastErr = err; lastPitch = pitch; lastRoll = roll;
-  lastLat = lat; lastLng = lng; lastSats = sats; lastObsDist = obsDist;
+  lastSynX = sanitize(synX); lastSynY = sanitize(synY); lastVolt = sanitize(volt);
+  lastTempC = sanitize(tempC); lastHum = sanitize(hum); lastPress = sanitize(press);
+  lastElev = sanitize(elev); lastMoist = moist; lastWatered = watered;
+  lastAbsHead = sanitize(absHead); lastErr = sanitize(err); lastPitch = sanitize(pitch);
+  lastRoll = sanitize(roll); lastLat = sanitize(lat); lastLng = sanitize(lng);
+  lastSats = sats; lastObsDist = sanitize(obsDist);
 }
 
 // =========================================================================
@@ -643,6 +658,13 @@ void setupAccessPoint() {
   Serial.println(F("\""));
   Serial.print(F("[WIFI] Connect to it, then reach the rover at http://"));
   Serial.println(WiFi.localIP());
+}
+
+// Replaces NaN/Infinity (e.g. from a disconnected sensor) with 0, since
+// String(NaN) renders as the bare word "nan" -- not a valid JSON number --
+// which would otherwise corrupt the entire /cmd?action=status response.
+float sanitize(float v) {
+  return (isnan(v) || isinf(v)) ? 0.0f : v;
 }
 
 float readUltrasonicCM() {
