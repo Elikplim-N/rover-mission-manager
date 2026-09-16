@@ -21,8 +21,8 @@ The system consists of three primary architectural tiers:
 ```mermaid
 flowchart TB
     subgraph EdgeTier["Edge Tier: Maize Rover (Arduino Uno R4 WiFi)"]
-        Sensors["Sensors: Dual MPU-6050 (0x68 Steering Gyro, 0x69 Roughness Accel), GPS, Moisture, Ultrasonic"]
-        Actuators["Actuators: Drive Motors, Seed Servo, Arm Servo, Water Pump"]
+        Sensors["Sensors: Dual MPU-6050 (0x68 Steering Gyro, 0x69 Roughness Accel), GPS, Moisture"]
+        Actuators["Actuators: Drive Motors, Seed Servo, Water Pump"]
         MCU["Renesas RA4M1 MCU + ESP32-S3 Wi-Fi Coprocessor\n(Hosts Access Point: 192.168.4.1)"]
         Sensors --> MCU
         MCU --> Actuators
@@ -90,9 +90,7 @@ Arduino Uno R4 Pinout
 │   above replaces it with gyro-integrated relative yaw instead.
 ├── Analog Inputs
 │   ├── A0: Soil Moisture Probe (0 - 1023 ADC raw resistance/capacitance)
-│   ├── A1: Battery Voltage Divider (B25 module, 5:1 divider, 0-25V range)
-│   ├── A2: Ultrasonic Trigger (HC-SR04 pulse initiation)
-│   └── A3: Ultrasonic Echo (HC-SR04 return pulse duration)
+│   └── A1: Battery Voltage Divider (B25 module, 5:1 divider, 0-25V range)
 ├── Actuators & Motor Control
 │   ├── D3 (PWM): Left Motor Forward (RPWM)
 │   ├── D4 (GPIO): Left Motor Enable / Remappable SPI CS
@@ -102,13 +100,20 @@ Arduino Uno R4 Pinout
 │   ├── D8 (GPIO): Right Motor Enable
 │   ├── D9 (PWM): Right Motor Reverse (LPWM)
 │   ├── D10 (PWM): Seed Dispenser Hopper Servo (0° closed, 60° open gate)
-│   ├── D11 (PWM): Piezo Buzzer (acoustic system alert & obstacle warning)
-│   ├── D12 (PWM): Articulated Tool Arm Servo (90° transit position)
-│   └── D13 (GPIO): WS2812B NeoPixel RGB Status Array (Green = Run, Red = Obstacle, Amber = Init)
+│   ├── D11 (PWM): Piezo Buzzer (acoustic system alert)
+│   └── D13 (GPIO): WS2812B NeoPixel RGB Status Array (Green = Run, Red = E-Stop, Amber = Init)
 └── Serial Interfaces
     ├── Serial (USB CDC): Primary telemetry output stream @ 115200 Baud
     └── Serial1 (D0 RX, D1 TX): GNSS / GPS Receiver @ 9600 Baud (TinyGPS++)
 ```
+
+NOTE: The HC-SR04 ultrasonic obstacle sensor and the articulated soil-probe
+arm servo (formerly D12) have also been physically removed from this
+hardware revision. Unlike the BME280/compass fields above, their telemetry
+(`obsDist`) and command (`test_arm`) were deleted outright rather than
+zeroed, since a fake "0cm to obstacle" reading would be actively misleading
+rather than simply unavailable. There is currently no obstacle-avoidance
+sensor on the rover.
 
 ### 2.3 Sensor Processing & Mathematical Transformations
 
@@ -146,10 +151,10 @@ stateDiagram-v2
     PAUSED --> MANUAL : Directional Nudge / Actuator Test
     MANUAL --> AUTO : Operator "Resume Auto" Command
 
-    IDLE --> ESTOP : Remote E-Stop / Obstacle / Voltage Failsafe
-    AUTO --> ESTOP : Remote E-Stop / Obstacle / Voltage Failsafe
-    PAUSED --> ESTOP : Remote E-Stop / Obstacle / Voltage Failsafe
-    MANUAL --> ESTOP : Remote E-Stop / Obstacle / Voltage Failsafe
+    IDLE --> ESTOP : Remote E-Stop / Voltage Failsafe
+    AUTO --> ESTOP : Remote E-Stop / Voltage Failsafe
+    PAUSED --> ESTOP : Remote E-Stop / Voltage Failsafe
+    MANUAL --> ESTOP : Remote E-Stop / Voltage Failsafe
     ESTOP --> MANUAL : Operator "Clear E-Stop"
 ```
 
@@ -161,7 +166,7 @@ stateDiagram-v2
    - `status`: read-only snapshot of mode, mission progress, and the latest drop's full telemetry, polled by the companion app to log each drop on-device.
 2. **Testing & Defense Demo Mode**:
    - Allows operator to drive the rover to a furrow starting point without triggering an autonomous planting cycle.
-   - Independent actuator test bench: single seed kernel drop (Hopper Servo D10), single water micro-dose 400ms pulse (Relay D7), articulated arm toggle (Servo D12).
+   - Independent actuator test bench: single seed kernel drop (Hopper Servo D10), single water micro-dose 400ms pulse (Relay D7).
 3. **Safety & Remote E-Stop**:
    - Preempts all states immediately. Forces motor PWM to 0, cuts pump power, activates continuous horn tone and flashing red NeoPixels.
    - Global E-Stop trigger accessible in header navigation bar across the entire companion app.
@@ -174,10 +179,10 @@ stateDiagram-v2
 
 ## 3. Telemetry Protocol Specification
 
-Every drop is recorded using the same exact 20-column schema everywhere it appears: the rover's local `/cmd?action=status` snapshot, its USB CSV mirror, and the companion app's on-device Dexie log:
+Every drop is recorded using the same exact 19-column schema everywhere it appears: the rover's local `/cmd?action=status` snapshot, its USB CSV mirror, and the companion app's on-device Dexie log:
 
 ```csv
-Row,Drop,SynX,SynY,Volt,TempC,Hum,Press,Elev,Moist,Watered,AbsHead,Err,Pitch,Roll,Lat,Lng,Sats,ObsDist,Roughness
+Row,Drop,SynX,SynY,Volt,TempC,Hum,Press,Elev,Moist,Watered,AbsHead,Err,Pitch,Roll,Lat,Lng,Sats,Roughness
 ```
 
 `Roughness` is new in this hardware revision; the cloud `telemetry_points` schema (Section 4.2) does not yet have a matching column, so it is currently dropped, not persisted, if a mission is pushed to the cloud for analysis.
@@ -204,7 +209,6 @@ Row,Drop,SynX,SynY,Volt,TempC,Hum,Press,Elev,Moist,Watered,AbsHead,Err,Pitch,Rol
 | **Lat** | `lat` | Float | deg | $-90.0 \dots 90.0$ | WGS84 GPS Latitude |
 | **Lng** | `lng` | Float | deg | $-180.0 \dots 180.0$| WGS84 GPS Longitude |
 | **Sats** | `sats` | Integer | count| $0 \dots 32$ | Visible and locked GNSS satellite count |
-| **ObsDist**| `obsDist`| Float | cm | $0.0 \dots 999.0$ | Forward clearance to nearest obstacle |
 | **Roughness**| `roughness`| Float | g | $0.0 \dots \sim 2.0$| Peak Z-axis accelerometer deviation from 1g during the segment, from MPU-6050 #2 (0x69) sampled at 200Hz |
 
 ---
@@ -278,7 +282,10 @@ CREATE TABLE telemetry_points (
     lat FLOAT,
     lng FLOAT,
     sats INT DEFAULT 0,
-    obs_dist FLOAT,
+    obs_dist FLOAT, -- Legacy column: the ultrasonic sensor that populated this has been
+                    -- physically removed from the rover; existing rows keep their real
+                    -- historical readings, but every new row inserts NULL here (both API
+                    -- deployments already fall back to NULL when this field is absent).
     recorded_at TIMESTAMPTZ DEFAULT NOW()
 );
 

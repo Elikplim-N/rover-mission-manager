@@ -23,11 +23,11 @@
     close to brushed-DC drive motors). MPU #1 (0x68) provides gyro Z-rate,
     integrated into a local relative-yaw-hold PID (P+I+D against 0 deg drift
     for the current straight segment) and into a running globalYaw estimate
-    used only for telemetry/logging. MPU #2 (0x69) provides Z-axis
-    accelerometer deviation from 1g, used as a terrain-roughness/shock metric.
-    Interruptible by E-Stop, pause, and obstacle detection at every control
-    tick, not just between drops. Kp/Ki/Kd/max-correction are runtime-tunable
-    via /cmd?action=config so field tuning never needs a reflash.
+    used only for telemetry/logging (reset to 0 at the start of every mission).
+    MPU #2 (0x69) provides Z-axis accelerometer deviation from 1g, used as a
+    terrain-roughness/shock metric. Interruptible by E-Stop and pause at every
+    control tick, not just between drops. Kp/Ki/Kd/max-correction are
+    runtime-tunable via /cmd?action=config so field tuning never needs a reflash.
   - Local mission configuration and lifecycle control over the port-8080 command
     server: config, start_mission, pause_mission, resume_mission, status
   - Status endpoint returns the latest telemetry snapshot and mission progress so a
@@ -35,15 +35,20 @@
     no internet connection required
   - Immediate Remote E-Stop override (Zero PWM, pump kill, acoustic alarm)
   - Manual Directional Nudge (Forward, Reverse, Left, Right, Stop) with 600ms deadman timeout
-  - Actuator Diagnostic Test Bench (Single Seed Pulse, Water Dose 400ms, Arm Toggle)
+  - Actuator Diagnostic Test Bench (Single Seed Pulse, Water Dose 400ms)
   - Embedded WiFiServer on Port 8080 for low-latency (<20ms) direct commands
-  - Ultrasonic Obstacle Collision Avoidance, MPU-6050 Pitch/Roll, and MPU-6050
-    Terrain Roughness (peak Z-axis shock per straight-line segment)
+  - MPU-6050 Pitch/Roll and MPU-6050 Terrain Roughness (peak Z-axis shock per
+    straight-line segment)
 
   NOTE: The BME280 (temperature/humidity/pressure/elevation) and HMC5883L/
   QMC5883L compass have been removed from this hardware revision. Their
   telemetry/CSV fields are kept in place (always reporting 0) rather than
   deleted, so the companion app's status JSON contract doesn't break.
+  The ultrasonic obstacle sensor and the soil-probe arm servo have also been
+  physically removed from this hardware revision; unlike the BME280/compass
+  fields, their telemetry (obsDist) and command (test_arm) have been deleted
+  outright rather than zeroed, since a fake "0cm to obstacle" reading would be
+  actively misleading rather than just unavailable.
 */
 
 #include <Wire.h>
@@ -91,8 +96,6 @@ WiFiServer cmdServer(8080);
 // =========================================================================
 #define MOISTURE_PIN      A0
 #define VOLTAGE_PIN       A1
-#define TRIG_PIN          A2
-#define ECHO_PIN          A3
 
 #define MOTOR_LEFT_RPWM   3
 #define MOTOR_LEFT_EN     4   // Dedicated to Left Motor Enable
@@ -103,13 +106,12 @@ WiFiServer cmdServer(8080);
 #define MOTOR_RIGHT_LPWM  9
 #define SEED_SERVO_PIN    10  // Dispenser hopper gate
 #define BUZZER_PIN        11  // Audio alert / obstacle buzzer
-#define ARM_SERVO_PIN     12  // Articulated soil tool
 #define RGB_PIN           13  // WS2812B Status Indicator
 
 // =========================================================================
 // FIELD GEOMETRY & TUNING (runtime-configurable via /cmd?action=config...)
 // =========================================================================
-#define NUM_LEDS           4
+#define NUM_LEDS           8
 int         BASE_SPEED     = 100;
 int         TURN_SPEED     = 100;
 const bool  LEFT_INVERT    = false;
@@ -148,14 +150,12 @@ bool missionComplete   = false; // true once TOTAL_ROWS has been fully covered
 TinyGPSPlus gps;
 Adafruit_NeoPixel strip(NUM_LEDS, RGB_PIN, NEO_GRB + NEO_KHZ800);
 Servo seedServo;
-Servo armServo;
 
 // State Variables
 int currentRow = 1;
 int currentDrop = 0;
 unsigned long lastDropTime = 0;
 unsigned long lastDriveCommandTime = 0;
-bool isArmDeployed = false;
 
 // Closed-loop navigation state
 float gyroZOffset   = 0.0;  // Measured at boot; subtract from raw gyro Z to get real rate
@@ -173,7 +173,7 @@ unsigned long telemetrySeq = 0;
 float lastSynX = 0, lastSynY = 0, lastVolt = 0, lastTempC = 0, lastHum = 0, lastPress = 0, lastElev = 0;
 int   lastMoist = 0;
 bool  lastWatered = false;
-float lastAbsHead = 0, lastErr = 0, lastPitch = 0, lastRoll = 0, lastLat = 0, lastLng = 0, lastObsDist = 0;
+float lastAbsHead = 0, lastErr = 0, lastPitch = 0, lastRoll = 0, lastLat = 0, lastLng = 0;
 float lastRoughness = 0;
 int   lastSats = 0;
 
@@ -186,9 +186,6 @@ void setup() {
   Wire.begin();
 
   // Pin Configurations
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-
   pinMode(MOTOR_LEFT_EN, OUTPUT);
   pinMode(MOTOR_RIGHT_EN, OUTPUT);
   digitalWrite(MOTOR_LEFT_EN, HIGH);
@@ -204,11 +201,9 @@ void setup() {
 
   pinMode(BUZZER_PIN, OUTPUT);
 
-  // Servos
+  // Servo
   seedServo.attach(SEED_SERVO_PIN);
-  armServo.attach(ARM_SERVO_PIN);
   seedServo.write(0);  // Gate closed
-  armServo.write(90);  // Transit clearance
 
   // NeoPixels
   strip.begin();
@@ -253,7 +248,7 @@ void setup() {
   setRGBColor(strip.Color(0, 120, 255)); // Blue: idle, awaiting mission config/start from the app
   strip.show();
 
-  Serial.println("Row,Drop,SynX,SynY,Volt,TempC,Hum,Press,Elev,Moist,Watered,AbsHead,Err,Pitch,Roll,Lat,Lng,Sats,ObsDist,Roughness");
+  Serial.println("Row,Drop,SynX,SynY,Volt,TempC,Hum,Press,Elev,Moist,Watered,AbsHead,Err,Pitch,Roll,Lat,Lng,Sats,Roughness");
 }
 
 // =========================================================================
@@ -307,16 +302,6 @@ void loop() {
     case MODE_AUTO:
     default: {
       setRGBColor(strip.Color(0, 255, 0)); // Solid Green
-
-      // Collision avoidance
-      float obsDist = readUltrasonicCM();
-      if (obsDist > 0 && obsDist < 20.0) {
-        stopMotors();
-        setRGBColor(strip.Color(255, 0, 0));
-        tone(BUZZER_PIN, 900, 60);
-        delay(80);
-        return;
-      }
 
       // Mission-complete check: currentRow only advances past TOTAL_ROWS once
       // the last row's final drop has been executed.
@@ -435,10 +420,6 @@ void handleIncomingCommands() {
     delay(400);
     digitalWrite(PUMP_RELAY_PIN, HIGH);
   }
-  else if (action == "test_arm" && currentMode != MODE_ESTOP) {
-    isArmDeployed = !isArmDeployed;
-    armServo.write(isArmDeployed ? 0 : 90);
-  }
   else if (action == "config") {
     // All parameters optional; only the ones present in the request are updated.
     String v;
@@ -468,6 +449,10 @@ void handleIncomingCommands() {
     currentMode = MODE_AUTO;
     // No absolute heading to lock anymore -- driveStraightPID holds a fresh
     // local relative-yaw reference (0 deg) for every segment on its own.
+    // globalYaw is reset here too, so each mission's logged/plotted heading
+    // starts from 0 instead of carrying over drift from however long the
+    // rover sat idle (or a previous mission) before this one started.
+    globalYaw = 0.0;
     Serial.println("[MISSION] Started.");
   }
   else if (action == "pause_mission") {
@@ -520,7 +505,6 @@ void handleIncomingCommands() {
            ",\"lat\":" + String(lastLat, 6) +
            ",\"lng\":" + String(lastLng, 6) +
            ",\"sats\":" + String(lastSats) +
-           ",\"obsDist\":" + String(lastObsDist, 1) +
            ",\"roughness\":" + String(lastRoughness, 3) + "}";
   } else {
     resp = "{\"ok\":true,\"mode\":\"" + modeStr + "\",\"action\":\"" + action + "\"}";
@@ -596,12 +580,11 @@ void stopMotors() {
 // AUTONOMOUS DRIVE ORCHESTRATION (bench-proven dual-MPU local-yaw PID loop)
 // =========================================================================
 // These block for multiple seconds at a time (there are no wheel encoders,
-// so distance is time-based), so each one polls handleIncomingCommands(),
-// the obstacle sensor, and currentMode on every iteration -- an E-Stop,
-// pause, or obstacle mid-drive takes effect immediately instead of only
-// being checked between drops. Returning false means "did not complete";
-// callers must not advance currentRow/currentDrop or treat the segment as
-// having actually happened.
+// so distance is time-based), so each one polls handleIncomingCommands()
+// and currentMode on every iteration -- an E-Stop or pause mid-drive takes
+// effect immediately instead of only being checked between drops. Returning
+// false means "did not complete"; callers must not advance
+// currentRow/currentDrop or treat the segment as having actually happened.
 
 // Interruptible settle-pause used between pivot/drive steps in a row
 // transition. A raw delay() here used to mean an E-Stop or pause mid-turn
@@ -640,14 +623,6 @@ bool driveStraightPID(unsigned long durationMs) {
     handleIncomingCommands();
     if (currentMode != MODE_AUTO) {
       stopMotors();
-      return false;
-    }
-
-    float obsDist = readUltrasonicCM();
-    if (obsDist > 0 && obsDist < 20.0) {
-      stopMotors();
-      setRGBColor(strip.Color(255, 0, 0));
-      tone(BUZZER_PIN, 900, 60);
       return false;
     }
 
@@ -725,12 +700,12 @@ bool performRowTransition(bool turnRight) {
   if (!safeDelay(300)) return false;
 
   if (!pivotByGyroAngle(turnRight, PIVOT_ANGLE_DEG)) return false;
-  if (!safeDelay(300)) return false; // let the chassis settle before trusting the drive
+  if (!safeDelay(400)) return false; // let the chassis settle before trusting the drive
 
   if (!driveStraightPID((unsigned long)(ROW_SPACING_M * MS_PER_METER_ROW_GAP))) return false;
 
   if (!pivotByGyroAngle(turnRight, PIVOT_ANGLE_DEG)) return false;
-  if (!safeDelay(300)) return false;
+  if (!safeDelay(400)) return false;
 
   return true;
 }
@@ -775,7 +750,6 @@ void executePlantingDrop() {
     : (DROPS_PER_ROW - currentDrop) * DROP_SPACING_M;
   float synY = (currentRow - 1) * ROW_SPACING_M;
 
-  float obsDist = readUltrasonicCM();
   // BME280 removed from this hardware revision -- always report 0 rather
   // than deleting the fields, so the app's JSON contract doesn't break.
   float tempC = 0.0f, hum = 0.0f, press = 0.0f, elev = 0.0f;
@@ -827,7 +801,6 @@ void executePlantingDrop() {
                      String(lat, 6) + "," +
                      String(lng, 6) + "," +
                      String(sats) + "," +
-                     String(obsDist, 1) + "," +
                      String(roughness, 3);
   Serial.println(csvRecord);
 
@@ -846,7 +819,7 @@ void executePlantingDrop() {
   lastElev = sanitize(elev); lastMoist = moist; lastWatered = watered;
   lastAbsHead = sanitize(absHead); lastErr = sanitize(err); lastPitch = sanitize(pitch);
   lastRoll = sanitize(roll); lastLat = sanitize(lat); lastLng = sanitize(lng);
-  lastSats = sats; lastObsDist = sanitize(obsDist); lastRoughness = sanitize(roughness);
+  lastSats = sats; lastRoughness = sanitize(roughness);
 }
 
 // =========================================================================
@@ -870,18 +843,6 @@ void setupAccessPoint() {
 // which would otherwise corrupt the entire /cmd?action=status response.
 float sanitize(float v) {
   return (isnan(v) || isinf(v)) ? 0.0f : v;
-}
-
-float readUltrasonicCM() {
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-
-  long duration = pulseIn(ECHO_PIN, HIGH, 25000);
-  if (duration == 0) return 999.0;
-  return (duration * 0.0343) / 2.0;
 }
 
 void readMPU6050(float &pitch, float &roll) {
